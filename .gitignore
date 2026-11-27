@@ -1,0 +1,9 @@
+node_modules
+dist
+site-dist
+.wrangler
+*.tgz
+.DS_Store
+test-results
+playwright-report
+.claude/

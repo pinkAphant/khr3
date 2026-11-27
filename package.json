@@ -1,0 +1,99 @@
+{
+  "name": "@khr3/core",
+  "version": "0.2.9",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./vehicle": {
+      "types": "./dist/vehicle.d.ts",
+      "import": "./dist/vehicle.js"
+    },
+    "./curves": {
+      "types": "./dist/curves.d.ts",
+      "import": "./dist/curves.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "LICENSE",
+    "README.md",
+    "AGENTS.md",
+    "CLAUDE.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "example": "tsx example/headless.ts",
+    "test": "node --import tsx --test \"src/**/*.test.ts*\"",
+    "build": "rm -rf dist && vite build && tsc -p tsconfig.build.json",
+    "prepack": "npm run build >&2",
+    "pack:dry": "npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "@dimforge/rapier3d-compat": "0.19.2",
+    "@pinkaphant/ecctrl": "2.0.4-beta.5",
+    "@react-three/fiber": "^9.0.0",
+    "@react-three/rapier": "^2.2.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "three": ">=0.159.0"
+  },
+  "peerDependenciesMeta": {
+    "@pinkaphant/ecctrl": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@dimforge/rapier3d-compat": "0.19.2",
+    "@pinkaphant/ecctrl": "2.0.4-beta.5",
+    "@playwright/test": "^1.65.1",
+    "@react-three/drei": "^10.7.7",
+    "@react-three/fiber": "^9.6.1",
+    "@react-three/rapier": "^2.2.0",
+    "@react-three/test-renderer": "^9.1.1",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.2.16",
+    "@types/react-dom": "^19.2.3",
+    "@types/three": "^0.184.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "three": "^0.184.0",
+    "tsx": "^4.23.15",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.8",
+    "wrangler": "^4.164.0"
+  },
+  "description": "KHR_physics_rigid_bodies + KHR_implicit_shapes loader, exporter, Rapier assembly and ecctrl vehicle rig for React Three Fiber",
+  "keywords": [
+    "gltf",
+    "khr_physics_rigid_bodies",
+    "rapier",
+    "react-three-fiber",
+    "ecctrl",
+    "vehicle"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pinkAphant/khr3.git"
+  },
+  "homepage": "https://khr3.optimuspi.workers.dev",
+  "bugs": {
+    "url": "https://github.com/pinkAphant/khr3/issues"
+  }
+}
