@@ -102,7 +102,9 @@ export async function exportKhrGlb(
         const shapes: Record<string, unknown>[] = [];
         const shapeIndexByJson = new Map<string, number>();
         const materials: Record<string, unknown>[] = [];
+        const matIndexByJson = new Map<string, number>();
         const filters: Record<string, unknown>[] = [];
+        const filterIndexByJson = new Map<string, number>();
         const joints: Record<string, unknown>[] = [];
         const omiWheels: Record<string, unknown>[] = [];
         const seenSpecNodes = new Set<string>();
@@ -173,13 +175,25 @@ export async function exportKhrGlb(
                 }
                 const mat = encodePhysicsMaterial(spec.collider, spec.nodeName);
                 if (mat) {
-                    col.physicsMaterial = materials.length;
-                    materials.push(mat);
+                    const key = JSON.stringify(mat);
+                    let mIdx = matIndexByJson.get(key);
+                    if (mIdx === undefined) {
+                        mIdx = materials.length;
+                        materials.push(mat);
+                        matIndexByJson.set(key, mIdx);
+                    }
+                    col.physicsMaterial = mIdx;
                 }
                 const filter = encodeCollisionFilter(spec.collider, spec.nodeName);
                 if (filter) {
-                    col.collisionFilter = filters.length;
-                    filters.push(filter);
+                    const key = JSON.stringify(filter);
+                    let fIdx = filterIndexByJson.get(key);
+                    if (fIdx === undefined) {
+                        fIdx = filters.length;
+                        filters.push(filter);
+                        filterIndexByJson.set(key, fIdx);
+                    }
+                    col.collisionFilter = fIdx;
                 }
                 khr.collider = col;
             }

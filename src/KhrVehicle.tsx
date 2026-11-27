@@ -28,7 +28,7 @@ export {
 export interface KhrVehicleProps extends Omit<EcctrlVehicleProps, "ref" | "carConfig" | "droneConfig"> {
     ref?: React.Ref<EcctrlVehicleHandle>;
     bundle: KhrAssetBundle;
-    vehicleRef?: React.RefObject<EcctrlVehicleHandle | null>;
+    vehicleRef?: React.Ref<EcctrlVehicleHandle | null>;
     jointsRef?: React.Ref<KhrVehicleJointsHandle>;
     carConfig?: Partial<KhrCarConfig>;
     droneConfig?: Partial<KhrDroneConfig>;
@@ -145,8 +145,10 @@ export function KhrVehicle({ scale, colliders, bundle, ...rest }: KhrVehicleProp
                 };
             }
             innerRef.current = handle;
-            if (vehicleRef)
-                vehicleRef.current = handle;
+            if (typeof vehicleRef === "function")
+                vehicleRef(handle);
+            else if (vehicleRef && typeof vehicleRef === "object")
+                (vehicleRef as React.MutableRefObject<EcctrlVehicleHandle | null>).current = handle;
             if (typeof ref === "function")
                 ref(handle);
             else if (ref && typeof ref === "object")
