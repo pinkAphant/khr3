@@ -1,10 +1,14 @@
 export { PhysicsWorld, type PhysicsWorldProps, type TimeControlValue } from "./PhysicsWorld.js";
 export {
+    JointRegistryContext,
     KhrValidationError,
-    createKhrGltfPlugin,
-    loadKhrGlb,
+    assignRef,
+    type CurveData,
+    type CurvePoint,
     type EcctrlPropellerTag,
     type EcctrlWheelTag,
+    type JointRegistry,
+    type JointRuntime,
     type KhrAssetBundle,
     type KhrBodySpec,
     type KhrBreakawaySpec,
@@ -23,12 +27,22 @@ export {
     type LoadKhrGlbOptions,
     type OmiVehicleWheelSpec,
     type UseKhrGlbOptions,
-} from "./khrLoader.js";
-export { exportKhrGlb, patchGlbJsonChunk } from "./khrExporter.js";
-export type { MutableGltfJson, RawGltfJson } from "./khrGlb.js";
-export { claimBundleMount, cloneKhrBundle, disposeKhrBundle, releaseBundleMount } from "./khrClone.js";
-export { assertIdentityWorldScale, assertSceneIdentityWorldScale, assertUnitScale } from "./khrInertia.js";
-export { KhrCollider, type KhrColliderProps } from "./KhrCollider.js";
-export { KhrAssembly, type KhrAssemblyHandle, type KhrAssemblyProps } from "./KhrAssembly.js";
-export { useKhrGlb } from "./useKhrGlb.js";
-export { JointRegistryContext, type JointRegistry, type JointRuntime } from "./physicsEcs.js";
+} from "./types.js";
+export { createKhrGltfPlugin, loadKhrGlb } from "./loader.js";
+export { exportKhrGlb, patchGlbJsonChunk } from "./exporter.js";
+export type { MutableGltfJson, RawGltfJson } from "./glb.js";
+export { claimBundleMount, cloneKhrBundle, disposeKhrBundle, releaseBundleMount } from "./clone.js";
+export { assertIdentityWorldScale, assertSceneIdentityWorldScale, assertUnitScale, computeShapeInertia } from "./inertia.js";
+export { KhrCollider, type ColliderMass, type KhrColliderProps } from "./KhrCollider.js";
+export { KhrAssembly, planAssembly, type KhrAssemblyHandle, type KhrAssemblyProps } from "./KhrAssembly.js";
+export { KhrGLTFLoader, createScopedGltfLoaderClass, useKhrGlb } from "./useKhrGlb.js";
+export {
+    ATTACHED_PANEL_INTERACTION_GROUPS,
+    DETACHED_PANEL_INTERACTION_GROUPS,
+    buildJointRuntime,
+    configureJointDrive,
+    createRapierImpulseJoint,
+    isJointOpen,
+    measureJointCoordinate,
+    openTargetForLimits,
+} from "./joints.js";

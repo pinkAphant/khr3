@@ -1,21 +1,496 @@
-import React, { useCallback, useImperativeHandle, useMemo, useRef } from "react";
-import type { ThreeElements } from "@react-three/fiber";
-import type { RapierRigidBody } from "@react-three/rapier";
+import React, { useCallback, useContext, useEffect, useImperativeHandle, useMemo, useRef } from "react";
 import * as THREE from "three";
-import { planAssembly } from "./assemblyPlan.js";
-import { type AssemblyRigidBodyProps, AssemblyRootBody } from "./AssemblyRootBody.js";
-import { BundleSceneHost, MountSubtreeSlot, captureSubtreeOrigins } from "./BundleSceneHost.js";
-import { assertSceneIdentityWorldScale, assertUnitScale } from "./khrInertia.js";
-import { type KhrAssetBundle } from "./khrTypes.js";
-import type { JointRuntime } from "./physicsEcs.js";
+import { useFrame, type ThreeElements } from "@react-three/fiber";
+import { RigidBody, useRapier, type RapierRigidBody, type RigidBodyProps } from "@react-three/rapier";
+import { useCustomGravity } from "@pinkaphant/ecctrl/gravity";
+import { BundleSceneHost, MountSubtreeSlot, captureSubtreeOrigins, type SubtreeOrigin } from "./clone.js";
+import {
+    assertSceneIdentityWorldScale,
+    assertUnitScale,
+    bodyPoseMatrix,
+    computeLumpedMassProps,
+    type LumpedMassProps,
+} from "./inertia.js";
+import { buildJointRuntime, createRapierImpulseJoint, isJointOpen, openTargetForLimits } from "./joints.js";
+import { type ColliderMass, KhrCollider } from "./KhrCollider.js";
+import {
+    JointRegistryContext,
+    type JointRuntime,
+    type KhrAssetBundle,
+    type KhrBodySpec,
+    type KhrColliderSpec,
+    type KhrJointSpec,
+    KhrValidationError,
+} from "./types.js";
+
+type Vec3 = [number, number, number];
+type Quat = [number, number, number, number];
+
+export interface PlannedCollider {
+    spec: KhrColliderSpec;
+    position: Vec3;
+    quaternion: Quat;
+    massProperties?: ColliderMass;
+}
+
+export interface PartPlan {
+    spec: KhrBodySpec;
+    joint: KhrJointSpec;
+    parent: PartPlan | null;
+    restRelParentPos: Vec3;
+    restRelParentQuat: Quat;
+    restRelRootPos: Vec3;
+    restRelRootQuat: Quat;
+    axisParent: Vec3;
+    axisChild: Vec3;
+    partMass?: ColliderMass;
+    colliders: PlannedCollider[];
+}
+
+export interface RootPlan {
+    spec: KhrBodySpec;
+    sceneInRootPos: Vec3;
+    sceneInRootQuat: Quat;
+    mountNode: THREE.Object3D;
+    mountPosition: Vec3;
+    mountQuaternion: Quat;
+    rootMass?: ColliderMass;
+    colliders: PlannedCollider[];
+    parts: PartPlan[];
+}
+
+export function toColliderMass(lumped: LumpedMassProps, colMat?: THREE.Matrix4, colQuat?: THREE.Quaternion): ColliderMass {
+    const com = new THREE.Vector3().fromArray(lumped.com);
+    const frame = new THREE.Quaternion().fromArray(lumped.inertiaFrame);
+    if (colMat && colQuat) {
+        com.applyMatrix4(colMat.clone().invert());
+        frame.premultiply(colQuat.clone().invert()).normalize();
+    }
+    return {
+        mass: lumped.mass,
+        centerOfMass: { x: com.x, y: com.y, z: com.z },
+        principalAngularInertia: { x: lumped.inertia[0], y: lumped.inertia[1], z: lumped.inertia[2] },
+        angularInertiaLocalFrame: { x: frame.x, y: frame.y, z: frame.z, w: frame.w },
+    };
+}
+
+function matrixToRoot(node: THREE.Object3D, sceneRoot: THREE.Object3D): THREE.Matrix4 {
+    const out = new THREE.Matrix4();
+    for (let cur: THREE.Object3D | null = node; cur && cur !== sceneRoot; cur = cur.parent) {
+        if (!cur.parent)
+            throw new KhrValidationError(`Node "${node.name}" is detached from bundle.scene`);
+        cur.updateMatrix();
+        out.premultiply(cur.matrix);
+    }
+    return out;
+}
+
+function isSceneDescendant(node: THREE.Object3D, ancestor: THREE.Object3D): boolean {
+    for (let cur: THREE.Object3D | null = node; cur; cur = cur.parent) {
+        if (cur === ancestor)
+            return true;
+    }
+    return false;
+}
+
+function lowestCommonAncestor(nodes: readonly THREE.Object3D[], sceneRoot: THREE.Object3D): THREE.Object3D {
+    let candidate = nodes[0];
+    while (candidate && candidate !== sceneRoot) {
+        if (nodes.every((n) => isSceneDescendant(n, candidate)))
+            return candidate;
+        candidate = candidate.parent ?? sceneRoot;
+    }
+    return sceneRoot;
+}
+
+function planOwnColliders(body: KhrBodySpec, lumped: LumpedMassProps | null, frameQuat?: THREE.Quaternion): PlannedCollider[] {
+    const one = new THREE.Vector3(1, 1, 1);
+    const frameMat = frameQuat ? new THREE.Matrix4().makeRotationFromQuaternion(frameQuat) : null;
+    const pos = new THREE.Vector3(), quat = new THREE.Quaternion(), scl = new THREE.Vector3();
+    return body.colliders.map((spec, idx) => {
+        const colQuat = new THREE.Quaternion().fromArray(spec.localQuaternion);
+        const local = new THREE.Matrix4().compose(new THREE.Vector3().fromArray(spec.localPosition), colQuat, one);
+        if (frameMat)
+            local.premultiply(frameMat);
+        local.decompose(pos, quat, scl);
+        quat.normalize();
+        const planned: PlannedCollider = {
+            spec,
+            position: [pos.x, pos.y, pos.z],
+            quaternion: [quat.x, quat.y, quat.z, quat.w],
+        };
+        if (idx === 0 && lumped)
+            planned.massProperties = toColliderMass(lumped, local, quat);
+        return planned;
+    });
+}
+
+export function planAssembly(bundle: KhrAssetBundle): RootPlan[] {
+    const byName = new Map(bundle.bodies.map((b) => [b.nodeName, b]));
+    const rootMemo = new Map<string, KhrBodySpec>();
+    const depthMemo = new Map<string, number>();
+
+    const resolveRootAndDepth = (b: KhrBodySpec, visiting = new Set<string>()): { root: KhrBodySpec; depth: number } => {
+        const cachedRoot = rootMemo.get(b.nodeName);
+        const cachedDepth = depthMemo.get(b.nodeName);
+        if (cachedRoot && cachedDepth !== undefined)
+            return { root: cachedRoot, depth: cachedDepth };
+        if (!b.joint) {
+            rootMemo.set(b.nodeName, b);
+            depthMemo.set(b.nodeName, 0);
+            return { root: b, depth: 0 };
+        }
+        if (visiting.has(b.nodeName))
+            throw new KhrValidationError(`Joint cycle through "${b.nodeName}"`);
+        visiting.add(b.nodeName);
+        const parent = byName.get(b.joint.connectedNodeName);
+        if (!parent) {
+            throw new KhrValidationError(`Joint on "${b.nodeName}" targets "${b.joint.connectedNodeName}", which is not a KHR body`);
+        }
+        const up = resolveRootAndDepth(parent, visiting);
+        rootMemo.set(b.nodeName, up.root);
+        depthMemo.set(b.nodeName, up.depth + 1);
+        return { root: up.root, depth: up.depth + 1 };
+    };
+
+    for (const b of bundle.bodies)
+        resolveRootAndDepth(b);
+
+    const plans = bundle.bodies
+        .filter((b) => !b.joint)
+        .map((root): RootPlan => {
+            const rootMat = bodyPoseMatrix(root);
+            const invRoot = rootMat.clone().invert();
+            const descendants = bundle.bodies
+                .filter((b) => b.joint && rootMemo.get(b.nodeName) === root)
+                .sort((a, b) => (depthMemo.get(a.nodeName) ?? 0) - (depthMemo.get(b.nodeName) ?? 0));
+
+            const partByName = new Map<string, PartPlan>();
+            const parts: PartPlan[] = descendants.map((b) => {
+                const joint = b.joint!;
+                const parent = partByName.get(joint.connectedNodeName) ?? null;
+                if (parent && !isSceneDescendant(b.object, parent.spec.object)) {
+                    throw new KhrValidationError(`Jointed node "${b.nodeName}" must be a scene-graph descendant of its jointed parent "${joint.connectedNodeName}"`);
+                }
+                const parentSpec = parent ? parent.spec : root;
+                const relParentMat = bodyPoseMatrix(parentSpec).clone().invert().multiply(bodyPoseMatrix(b));
+                const relRootMat = invRoot.clone().multiply(bodyPoseMatrix(b));
+                const rpPos = new THREE.Vector3(), tmpQ = new THREE.Quaternion(), rpScl = new THREE.Vector3();
+                relParentMat.decompose(rpPos, tmpQ, rpScl);
+                const rrPos = new THREE.Vector3(), rrQuat = new THREE.Quaternion();
+                relRootMat.decompose(rrPos, rrQuat, rpScl);
+                rrQuat.normalize();
+
+                const axChildVec = new THREE.Vector3().fromArray(joint.axis).normalize();
+                const axParentVec = axChildVec.clone().applyQuaternion(rrQuat).normalize();
+                const anchorParent: Vec3 = parent
+                    ? [rrPos.x - parent.restRelRootPos[0], rrPos.y - parent.restRelRootPos[1], rrPos.z - parent.restRelRootPos[2]]
+                    : [rpPos.x, rpPos.y, rpPos.z];
+
+                const bodyAlignInv = new THREE.Matrix4().compose(
+                    new THREE.Vector3().fromArray(b.localPosition),
+                    new THREE.Quaternion().fromArray(root.localQuaternion),
+                    new THREE.Vector3(1, 1, 1),
+                ).invert();
+                const ownLumped = b.isKinematic ? null : computeLumpedMassProps([b], bodyAlignInv);
+                const colliders = planOwnColliders(b, ownLumped, rrQuat);
+                const partMass = ownLumped && colliders.length === 0 ? toColliderMass(ownLumped) : undefined;
+
+                const plan: PartPlan = {
+                    spec: b,
+                    joint,
+                    parent,
+                    restRelParentPos: anchorParent,
+                    restRelParentQuat: [rrQuat.x, rrQuat.y, rrQuat.z, rrQuat.w],
+                    restRelRootPos: [rrPos.x, rrPos.y, rrPos.z],
+                    restRelRootQuat: [rrQuat.x, rrQuat.y, rrQuat.z, rrQuat.w],
+                    axisParent: [axParentVec.x, axParentVec.y, axParentVec.z],
+                    axisChild: [axChildVec.x, axChildVec.y, axChildVec.z],
+                    ...(partMass ? { partMass } : {}),
+                    colliders,
+                };
+                partByName.set(b.nodeName, plan);
+                return plan;
+            });
+
+            const rootLumped = root.isKinematic ? null : computeLumpedMassProps([root], invRoot);
+            const colliders = planOwnColliders(root, rootLumped);
+            const rootMass = rootLumped && colliders.length === 0 ? toColliderMass(rootLumped) : undefined;
+            const mountNode = lowestCommonAncestor([root.object, ...descendants.map((d) => d.object)], bundle.scene);
+            const mountInRoot = invRoot.clone().multiply(matrixToRoot(mountNode, bundle.scene));
+
+            const scenePos = new THREE.Vector3(), sceneQuat = new THREE.Quaternion(), sceneScl = new THREE.Vector3();
+            invRoot.decompose(scenePos, sceneQuat, sceneScl);
+            sceneQuat.normalize();
+            const mountPos = new THREE.Vector3(), mountQuat = new THREE.Quaternion();
+            mountInRoot.decompose(mountPos, mountQuat, sceneScl);
+            mountQuat.normalize();
+
+            return {
+                spec: root,
+                sceneInRootPos: [scenePos.x, scenePos.y, scenePos.z],
+                sceneInRootQuat: [sceneQuat.x, sceneQuat.y, sceneQuat.z, sceneQuat.w],
+                mountNode,
+                mountPosition: [mountPos.x, mountPos.y, mountPos.z],
+                mountQuaternion: [mountQuat.x, mountQuat.y, mountQuat.z, mountQuat.w],
+                ...(rootMass ? { rootMass } : {}),
+                colliders,
+                parts,
+            };
+        });
+
+    for (const a of plans) {
+        for (const b of plans) {
+            if (a !== b && isSceneDescendant(b.mountNode, a.mountNode)) {
+                throw new KhrValidationError(`Root bodies "${a.spec.nodeName}" and "${b.spec.nodeName}" share scene subtree "${a.mountNode.name}"; split them into separate glTF branches`);
+            }
+        }
+    }
+    return plans;
+}
+
+export type AssemblyRigidBodyProps = Omit<
+    RigidBodyProps,
+    "type" | "position" | "rotation" | "quaternion" | "colliders" | "children" | "ref"
+>;
+
+function ArticulatedPartBody({
+    part,
+    rootSpec,
+    rootPos,
+    rootQuat,
+    parentBody,
+    origin,
+    onBody,
+    onJointReady,
+}: {
+    part: PartPlan;
+    rootSpec: RootPlan["spec"];
+    rootPos: readonly [number, number, number];
+    rootQuat: readonly [number, number, number, number];
+    parentBody: RapierRigidBody | null;
+    origin?: SubtreeOrigin;
+    onBody: (nodeName: string, rb: RapierRigidBody | null) => void;
+    onJointReady: (nodeName: string, obj: THREE.Object3D, rt: JointRuntime | null) => void;
+}): React.JSX.Element {
+    const { rapier, world } = useRapier();
+    const registry = useContext(JointRegistryContext);
+    const childRef = useRef<RapierRigidBody | null>(null);
+    const rtRef = useRef<JointRuntime | null>(null);
+    const [childBody, setChildBody] = React.useState<RapierRigidBody | null>(null);
+
+    const worldPose = useMemo(() => {
+        const rq = new THREE.Quaternion(rootQuat[0], rootQuat[1], rootQuat[2], rootQuat[3]).normalize();
+        const pos = new THREE.Vector3().fromArray(part.restRelRootPos).applyQuaternion(rq).add(new THREE.Vector3(rootPos[0], rootPos[1], rootPos[2]));
+        return {
+            pos: [pos.x, pos.y, pos.z] as Vec3,
+            quat: [rq.x, rq.y, rq.z, rq.w] as Quat,
+        };
+    }, [part.restRelRootPos, rootPos, rootQuat]);
+
+    const assignChildRef = useCallback((rb: RapierRigidBody | null) => {
+        childRef.current = rb;
+        setChildBody(rb);
+        onBody(part.spec.nodeName, rb);
+    }, [part.spec.nodeName, onBody]);
+
+    useEffect(() => () => onBody(part.spec.nodeName, null), [part.spec.nodeName, onBody]);
+
+    useEffect(() => {
+        const pm = part.partMass;
+        if (childBody && pm) {
+            childBody.setAdditionalMassProperties(pm.mass, pm.centerOfMass, pm.principalAngularInertia, pm.angularInertiaLocalFrame, true);
+            childBody.recomputeMassPropertiesFromColliders();
+        }
+    }, [childBody, part.partMass]);
+
+    useEffect(() => {
+        if (!parentBody || !childBody)
+            return;
+        const imp = createRapierImpulseJoint(
+            rapier,
+            world,
+            parentBody,
+            childBody,
+            part.joint,
+            part.restRelParentPos,
+            [0, 0, 0],
+            part.axisParent,
+            part.axisChild,
+            part.restRelParentQuat,
+        );
+        const rt = buildJointRuntime({
+            rapier,
+            world,
+            nodeName: part.spec.nodeName,
+            role: part.joint.role,
+            kind: part.joint.kind,
+            object: part.spec.object,
+            axisParent: part.axisParent,
+            anchorParent: part.restRelParentPos,
+            limits: part.joint.limits,
+            drive: part.joint.drive,
+            breakaway: part.spec.breakaway,
+            rapierJoint: imp,
+            parentBody,
+            childBody,
+        });
+        rtRef.current = rt;
+        registry?.add(rt);
+        onJointReady(rt.nodeName, part.spec.object, rt);
+        return () => {
+            rtRef.current = null;
+            registry?.delete(rt);
+            onJointReady(rt.nodeName, part.spec.object, null);
+            if (rt.rapierJoint && world.getImpulseJoint(rt.rapierJoint.handle))
+                world.removeImpulseJoint(rt.rapierJoint, true);
+        };
+    }, [rapier, world, part, parentBody, childBody, registry, onJointReady]);
+
+    const onForce = useMemo(
+        () =>
+            part.spec.breakaway
+                ? (p: { totalForceMagnitude: number }) => {
+                    if (world.timestep > 0)
+                        rtRef.current?.applyImpactImpulse(p.totalForceMagnitude * world.timestep);
+                }
+                : undefined,
+        [part.spec.breakaway, world],
+    );
+
+    const linVel = part.spec.linearVelocity ?? rootSpec.linearVelocity;
+    const angVel = part.spec.angularVelocity ?? rootSpec.angularVelocity;
+    const gravScale = part.spec.gravityFactor ?? rootSpec.gravityFactor;
+
+    return (
+        <RigidBody
+            ref={assignChildRef}
+            type={part.spec.isKinematic ? "kinematicPosition" : "dynamic"}
+            position={worldPose.pos}
+            quaternion={worldPose.quat}
+            colliders={false}
+            onContactForce={onForce}
+            {...(linVel ? { linearVelocity: linVel } : {})}
+            {...(angVel ? { angularVelocity: angVel } : {})}
+            {...(gravScale === undefined ? {} : { gravityScale: gravScale })}
+        >
+            <MountSubtreeSlot object={part.spec.object} position={[0, 0, 0]} quaternion={part.restRelRootQuat} origin={origin} />
+            {part.colliders.map((col, cIdx) => (
+                <KhrCollider
+                    key={`${part.spec.nodeName}:${cIdx}`}
+                    c={col.spec}
+                    position={col.position}
+                    quaternion={col.quaternion}
+                    massProperties={col.massProperties}
+                />
+            ))}
+        </RigidBody>
+    );
+}
+
+function AssemblyRootBody({
+    plan,
+    bundleScene,
+    position,
+    quaternion,
+    fixedRoot,
+    rigidBodyProps,
+    onBody,
+    onJointReady,
+    children,
+}: {
+    plan: RootPlan;
+    bundleScene: THREE.Object3D;
+    position: Vec3;
+    quaternion: Quat;
+    fixedRoot: boolean;
+    rigidBodyProps?: AssemblyRigidBodyProps;
+    onBody: (nodeName: string, rb: RapierRigidBody | null) => void;
+    onJointReady: (nodeName: string, obj: THREE.Object3D, rt: JointRuntime | null) => void;
+    children?: React.ReactNode;
+}): React.JSX.Element {
+    const [rootBody, setRootBody] = React.useState<RapierRigidBody | null>(null);
+    const [partBodies, setPartBodies] = React.useState<ReadonlyMap<string, RapierRigidBody>>(() => new Map());
+
+    const partOrigins = useMemo(
+        () => (plan.parts.length > 0 ? captureSubtreeOrigins(plan.parts.map((p) => p.spec.object), bundleScene) : null),
+        [plan.parts, bundleScene],
+    );
+
+    const rootSpec = plan.spec;
+    const assignRootRef = useCallback((rb: RapierRigidBody | null) => {
+        setRootBody(rb);
+        onBody(rootSpec.nodeName, rb);
+    }, [rootSpec.nodeName, onBody]);
+
+    useEffect(() => () => onBody(rootSpec.nodeName, null), [rootSpec.nodeName, onBody]);
+
+    useEffect(() => {
+        const rm = plan.rootMass;
+        if (rootBody && rm) {
+            rootBody.setAdditionalMassProperties(rm.mass, rm.centerOfMass, rm.principalAngularInertia, rm.angularInertiaLocalFrame, true);
+            rootBody.recomputeMassPropertiesFromColliders();
+        }
+    }, [rootBody, plan.rootMass]);
+
+    const handlePartBody = useCallback((nodeName: string, rb: RapierRigidBody | null) => {
+        setPartBodies((prev) => {
+            if ((prev.get(nodeName) ?? null) === rb)
+                return prev;
+            const next = new Map(prev);
+            if (rb)
+                next.set(nodeName, rb);
+            else
+                next.delete(nodeName);
+            return next;
+        });
+        onBody(nodeName, rb);
+    }, [onBody]);
+
+    const bodyType = rootSpec.isKinematic ? (fixedRoot ? "fixed" : "kinematicPosition") : "dynamic";
+
+    return (
+        <>
+            <RigidBody
+                {...rigidBodyProps}
+                ref={assignRootRef}
+                type={bodyType}
+                position={position}
+                quaternion={quaternion}
+                colliders={false}
+                {...(rootSpec.linearVelocity ? { linearVelocity: rootSpec.linearVelocity } : {})}
+                {...(rootSpec.angularVelocity ? { angularVelocity: rootSpec.angularVelocity } : {})}
+                {...(rootSpec.gravityFactor === undefined ? {} : { gravityScale: rootSpec.gravityFactor })}
+            >
+                {children}
+                {plan.colliders.map((col, idx) => (
+                    <KhrCollider key={`r${idx}`} c={col.spec} position={col.position} quaternion={col.quaternion} massProperties={col.massProperties} />
+                ))}
+            </RigidBody>
+            {plan.parts.map((part) => (
+                <ArticulatedPartBody
+                    key={part.spec.nodeName}
+                    part={part}
+                    rootSpec={rootSpec}
+                    rootPos={position}
+                    rootQuat={quaternion}
+                    parentBody={part.parent ? (partBodies.get(part.parent.spec.nodeName) ?? null) : rootBody}
+                    origin={partOrigins?.get(part.spec.object)}
+                    onBody={handlePartBody}
+                    onJointReady={onJointReady}
+                />
+            ))}
+        </>
+    );
+}
 
 export interface KhrAssemblyHandle {
-    /** RigidBody owning `nodeName`, or null if absent from the KHR bundle. */
+    readonly jointNames: readonly string[];
     getBody: (nodeName: string) => RapierRigidBody | null;
-    /** Sets the authored Rapier motor position target on one articulated node. */
+    getJointRuntime: (nodeName: string) => JointRuntime | null;
     setJointTarget: (nodeName: string, target: number) => void;
-    /** Sets the motor position target on every articulated node whose `extras.role` matches. */
     setRoleTarget: (role: string, target: number) => void;
+    toggleHitObject: (hit: THREE.Object3D | null) => boolean;
 }
 
 type GroupProps = Omit<ThreeElements["group"], "ref" | "position" | "rotation" | "quaternion" | "scale" | "children">;
@@ -28,6 +503,7 @@ export interface KhrAssemblyProps extends GroupProps {
     quaternion?: [number, number, number, number];
     scale?: ThreeElements["group"]["scale"];
     fixedRoot?: boolean;
+    enableCustomGravity?: boolean;
     rigidBodyProps?: AssemblyRigidBodyProps;
     children?: React.ReactNode;
 }
@@ -40,77 +516,102 @@ export function KhrAssembly({
     quaternion,
     scale,
     fixedRoot = false,
+    enableCustomGravity = false,
     rigidBodyProps,
     children,
     ...groupProps
 }: KhrAssemblyProps): React.JSX.Element {
     assertUnitScale(scale, "KhrAssembly");
-    bundle.scene.updateMatrixWorld(true);
-    assertSceneIdentityWorldScale(bundle.scene);
+    useMemo(() => assertSceneIdentityWorldScale(bundle.scene), [bundle]);
 
+    const { world } = useRapier();
+    const applyGravityField = useCustomGravity((s) => s.applyGravityField);
     const plans = useMemo(() => planAssembly(bundle), [bundle]);
-    const origins = useMemo(() => (plans.length > 1 ? captureSubtreeOrigins(plans.map((p) => p.mountNode)) : null), [plans]);
+    const origins = useMemo(
+        () => (plans.length > 1 ? captureSubtreeOrigins(plans.map((p) => p.mountNode), bundle.scene) : null),
+        [plans, bundle.scene],
+    );
+
     const [px, py, pz] = position;
     const [rx, ry, rz] = rotation ?? [0, 0, 0];
     const [qx, qy, qz, qw] = quaternion ?? [NaN, NaN, NaN, NaN];
     const spawnQuat = useMemo(
         () => (quaternion ? new THREE.Quaternion(qx, qy, qz, qw) : new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz))),
-        [qx, qy, qz, qw, rx, ry, rz],
+        [qx, qy, qz, qw, rx, ry, rz, Boolean(quaternion)],
     );
+
     const rootPoses = useMemo(
         () =>
             plans.map((p) => {
                 const pos = new THREE.Vector3().fromArray(p.spec.localPosition).applyQuaternion(spawnQuat).add(new THREE.Vector3(px, py, pz));
                 const quat = spawnQuat.clone().multiply(new THREE.Quaternion().fromArray(p.spec.localQuaternion));
                 return {
-                    position: [pos.x, pos.y, pos.z] as [number, number, number],
-                    quaternion: [quat.x, quat.y, quat.z, quat.w] as [number, number, number, number],
+                    position: [pos.x, pos.y, pos.z] as Vec3,
+                    quaternion: [quat.x, quat.y, quat.z, quat.w] as Quat,
                 };
             }),
         [plans, spawnQuat, px, py, pz],
     );
 
-    const bodiesRef = useRef(new Map<string, React.RefObject<RapierRigidBody | null>>());
-    const jointsRef = useRef(new Map<string, Map<string, JointRuntime>>());
-    const nodeToRoot = useMemo(() => {
-        const m = new Map<string, string>();
-        for (const p of plans) {
-            m.set(p.spec.nodeName, p.spec.nodeName);
-            for (const part of p.parts)
-                m.set(part.spec.nodeName, p.spec.nodeName);
-        }
-        return m;
-    }, [plans]);
+    const bodiesRef = useRef(new Map<string, RapierRigidBody>());
+    const jointsRef = useRef(new Map<string, JointRuntime>());
+    const byObjectRef = useRef(new Map<THREE.Object3D, JointRuntime>());
 
-    const handleBody = useCallback((nodeName: string, rb: React.RefObject<RapierRigidBody | null> | null) => {
+    const handleBody = useCallback((nodeName: string, rb: RapierRigidBody | null) => {
         if (rb)
             bodiesRef.current.set(nodeName, rb);
         else
             bodiesRef.current.delete(nodeName);
     }, []);
-    const handleJoints = useCallback((rootName: string, map: Map<string, JointRuntime> | null) => {
-        if (map)
-            jointsRef.current.set(rootName, map);
-        else
-            jointsRef.current.delete(rootName);
+
+    const handleJointReady = useCallback((nodeName: string, obj: THREE.Object3D, rt: JointRuntime | null) => {
+        if (rt) {
+            jointsRef.current.set(nodeName, rt);
+            byObjectRef.current.set(obj, rt);
+        }
+        else {
+            jointsRef.current.delete(nodeName);
+            byObjectRef.current.delete(obj);
+        }
     }, []);
 
+    useFrame(() => {
+        if (!enableCustomGravity || world.timestep <= 0)
+            return;
+        for (const rb of bodiesRef.current.values()) {
+            if (rb.isDynamic())
+                applyGravityField(rb, world.timestep);
+        }
+    });
+
     useImperativeHandle(ref, () => ({
-        getBody: (nodeName: string) => bodiesRef.current.get(nodeName)?.current ?? null,
+        get jointNames() {
+            return [...jointsRef.current.keys()];
+        },
+        getBody: (nodeName: string) => bodiesRef.current.get(nodeName) ?? null,
+        getJointRuntime: (nodeName: string) => jointsRef.current.get(nodeName) ?? null,
         setJointTarget: (nodeName: string, target: number) => {
-            const rt = jointsRef.current.get(nodeToRoot.get(nodeName) ?? "")?.get(nodeName);
-            if (rt)
-                rt.applyTarget(target);
+            jointsRef.current.get(nodeName)?.applyTarget(target);
         },
         setRoleTarget: (role: string, target: number) => {
-            for (const map of jointsRef.current.values()) {
-                for (const rt of map.values()) {
-                    if (rt.role === role)
-                        rt.applyTarget(target);
-                }
+            for (const rt of jointsRef.current.values()) {
+                if (rt.role === role)
+                    rt.applyTarget(target);
             }
         },
-    }), [nodeToRoot]);
+        toggleHitObject: (hit: THREE.Object3D | null) => {
+            for (let cur = hit; cur; cur = cur.parent) {
+                const rt = byObjectRef.current.get(cur);
+                if (rt && rt.drive?.stiffness !== undefined) {
+                    const limits = rt.limits ?? [0, Math.PI / 2];
+                    const nextTgt = isJointOpen(rt) ? Math.min(limits[1], Math.max(limits[0], 0)) : openTargetForLimits(limits);
+                    rt.applyTarget(nextTgt);
+                    return true;
+                }
+            }
+            return false;
+        },
+    }), []);
 
     if (plans.length === 1) {
         const plan = plans[0];
@@ -119,12 +620,13 @@ export function KhrAssembly({
                 <AssemblyRootBody
                     key={`${bundle.scene.uuid}:${plan.spec.nodeName}`}
                     plan={plan}
+                    bundleScene={bundle.scene}
                     position={rootPoses[0].position}
                     quaternion={rootPoses[0].quaternion}
                     fixedRoot={fixedRoot}
                     rigidBodyProps={rigidBodyProps}
                     onBody={handleBody}
-                    onJoints={handleJoints}
+                    onJointReady={handleJointReady}
                 >
                     <group position={plan.sceneInRootPos} quaternion={plan.sceneInRootQuat}>
                         <BundleSceneHost bundle={bundle} owner="KhrAssembly" />
@@ -145,12 +647,13 @@ export function KhrAssembly({
                 <AssemblyRootBody
                     key={`${bundle.scene.uuid}:${plan.spec.nodeName}`}
                     plan={plan}
+                    bundleScene={bundle.scene}
                     position={rootPoses[idx].position}
                     quaternion={rootPoses[idx].quaternion}
                     fixedRoot={fixedRoot}
                     rigidBodyProps={rigidBodyProps}
                     onBody={handleBody}
-                    onJoints={handleJoints}
+                    onJointReady={handleJointReady}
                 >
                     <MountSubtreeSlot
                         object={plan.mountNode}

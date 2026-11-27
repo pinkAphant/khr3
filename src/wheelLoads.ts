@@ -1,7 +1,7 @@
 import * as THREE from "three";
-import { type EcctrlWheelTag } from "./khrTypes.js";
+import type { EcctrlWheelTag } from "./types.js";
 
-const G_SI = 9.81;
+export const STANDARD_GRAVITY = 9.81;
 
 export interface SolvedWheel {
     tag: EcctrlWheelTag;
@@ -51,9 +51,7 @@ function solveCornerMasses(
     const cx = xs.map((v) => v - meanX);
     const cz = zs.map((v) => v - meanZ);
 
-    let sxx = 0;
-    let szz = 0;
-    let sxz = 0;
+    let sxx = 0, szz = 0, sxz = 0;
     for (let i = 0; i < n; i++) {
         sxx += cx[i] * cx[i];
         szz += cz[i] * cz[i];
@@ -64,8 +62,7 @@ function solveCornerMasses(
     const bz = -totalMassKg * meanZ;
     const det = sxx * szz - sxz * sxz;
     const trace = sxx + szz;
-    let lx = 0;
-    let lz = 0;
+    let lx = 0, lz = 0;
 
     if (det > 1e-10 * trace * trace && det > 1e-12) {
         lx = (szz * bx - sxz * bz) / det;
@@ -92,22 +89,23 @@ function solveCornerMasses(
 
 /**
  * Distributes `totalMassKg` across N >= 1 wheels around `com`, resolves fallback
- * `springK` / `dampingC` when omitted on the `.glb` wheel descriptor, and returns
- * natural scene-space `mountPos` (`tag.position + lift`).
+ * `springK` / `dampingC` using reference surface gravity `refGravity` (defaulting to `9.81 m/s^2`),
+ * and computes natural scene-space `mountPos` (`tag.position + lift`).
  */
 export function solveWheelLoads(
     wheels: readonly EcctrlWheelTag[],
     totalMassKg: number,
     com: readonly [number, number, number],
     dampingRatio = 0.7,
+    refGravity = STANDARD_GRAVITY,
 ): SolvedWheel[] {
     if (wheels.length === 0)
         return [];
-
+    const effG = refGravity > 1e-4 ? refGravity : STANDARD_GRAVITY;
     const cornerMasses = solveCornerMasses(wheels, totalMassKg, com);
     return wheels.map((tag, i) => {
         const cornerMassKg = cornerMasses[i];
-        const springK = tag.springK ?? (cornerMassKg * G_SI) / Math.max(tag.sag, 1e-4);
+        const springK = tag.springK ?? (cornerMassKg * effG) / Math.max(tag.sag, 1e-4);
         const dampingC = tag.dampingC ?? 2 * dampingRatio * Math.sqrt(springK * cornerMassKg);
         const lift = Math.max(0, tag.travel - tag.sag);
         const mountOffset = new THREE.Vector3(0, lift, 0);
@@ -116,11 +114,16 @@ export function solveWheelLoads(
                 new THREE.Quaternion(tag.quaternion[0], tag.quaternion[1], tag.quaternion[2], tag.quaternion[3]).normalize(),
             );
         }
-        const mountPos: [number, number, number] = [
-            tag.position[0] + mountOffset.x,
-            tag.position[1] + mountOffset.y,
-            tag.position[2] + mountOffset.z,
-        ];
-        return { tag, cornerMassKg, springK, dampingC, mountPos };
+        return {
+            tag,
+            cornerMassKg,
+            springK,
+            dampingC,
+            mountPos: [
+                tag.position[0] + mountOffset.x,
+                tag.position[1] + mountOffset.y,
+                tag.position[2] + mountOffset.z,
+            ],
+        };
     });
 }

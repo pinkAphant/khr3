@@ -1,20 +1,19 @@
 import * as THREE from "three";
 import type RAPIER from "@dimforge/rapier3d-compat";
-import { type KhrBreakawaySpec, type KhrJointDriveSpec, type KhrJointSpec, KhrValidationError } from "./khrTypes.js";
-import type { JointRuntime } from "./physicsEcs.js";
+import { type JointRuntime, type KhrBreakawaySpec, type KhrJointDriveSpec, type KhrJointSpec, KhrValidationError } from "./types.js";
 
 /**
  * Rapier interaction group bitmask for attached vehicle articulated panels:
- * member of group 14 (`0x4000`), collides with all groups except 14 (`0xbfff`),
- * preventing adjacent hinged panels (e.g. `door_fl` <-> `door_rl` / `hood`) from
+ * member of group 1 (`0x0002`), collides with all groups except group 1 (`0xfffd`),
+ * preventing sibling hinged panels (e.g. `door_fl` <-> `door_rl` / `hood`) from
  * fighting across joints while colliding normally with world geometry and projectiles.
  */
-export const VEHICLE_PANEL_INTERACTION_GROUPS = 0x0002fffd;
+export const ATTACHED_PANEL_INTERACTION_GROUPS = 0x0002fffd;
+export const DETACHED_PANEL_INTERACTION_GROUPS = 0xffffffff;
 
 const _q1 = new THREE.Quaternion();
 const _q2 = new THREE.Quaternion();
 const _qRel = new THREE.Quaternion();
-const _restInv = new THREE.Quaternion();
 const _deltaPos = new THREE.Vector3();
 const _axWorld = new THREE.Vector3();
 
@@ -35,18 +34,15 @@ export function createRapierImpulseJoint(
     const qRel = _qRel.set(restFrameRelQuat[0], restFrameRelQuat[1], restFrameRelQuat[2], restFrameRelQuat[3]).normalize();
     const axFromChild = _axWorld.set(axisChild[0], axisChild[1], axisChild[2]).applyQuaternion(qRel);
     const ax = (axFromChild.lengthSq() > 1e-12 ? axFromChild : _axWorld.set(axisParent[0], axisParent[1], axisParent[2])).normalize();
+
     let data: RAPIER.JointData;
     if (joint.kind === "fixed") {
         const pr = parentBody.rotation();
         const cr = childBody.rotation();
         const bodyRel = _q1.set(pr.x, pr.y, pr.z, pr.w).invert().multiply(_q2.set(cr.x, cr.y, cr.z, cr.w)).normalize();
-        const useBodyRel = Math.abs(bodyRel.x) + Math.abs(bodyRel.y) + Math.abs(bodyRel.z) <= 1e-6 && Math.abs(Math.abs(bodyRel.w) - 1) <= 1e-6;
-        const f1 = useBodyRel
-            ? { x: bodyRel.x, y: bodyRel.y, z: bodyRel.z, w: bodyRel.w }
-            : { x: qRel.x, y: qRel.y, z: qRel.z, w: qRel.w };
         data = rapier.JointData.fixed(
             a1,
-            f1,
+            { x: bodyRel.x, y: bodyRel.y, z: bodyRel.z, w: bodyRel.w },
             a2,
             { x: 0, y: 0, z: 0, w: 1 },
         );
@@ -65,10 +61,23 @@ export function createRapierImpulseJoint(
             data.limits = [joint.limits[0], joint.limits[1]];
         }
     }
+
     const imp = world.createImpulseJoint(data, parentBody, childBody, true);
     imp.setContactsEnabled(Boolean(joint.enableCollision));
-    configureJointDrive(rapier, imp, joint.kind, joint.drive, joint.drive?.positionTarget ?? null);
+    const activeDrive = selectMatchingDrive(joint);
+    configureJointDrive(rapier, imp, joint.kind, activeDrive, activeDrive?.positionTarget ?? null);
     return imp;
+}
+
+function selectMatchingDrive(joint: KhrJointSpec): KhrJointDriveSpec | null {
+    if (joint.kind === "fixed")
+        return null;
+    const expectedType = joint.kind === "revolute" ? "angular" : "linear";
+    for (const d of joint.drives) {
+        if (d.type === undefined || d.type === expectedType)
+            return d;
+    }
+    return joint.drive;
 }
 
 export function configureJointDrive(
@@ -107,7 +116,6 @@ export function measureJointCoordinate(
     kind: KhrJointSpec["kind"],
     axisParent: readonly [number, number, number],
     anchorParent: readonly [number, number, number],
-    restRelQuat: readonly [number, number, number, number],
 ): number {
     if (!parentBody || !childBody || kind === "fixed")
         return 0;
@@ -123,8 +131,7 @@ export function measureJointCoordinate(
         _axWorld.set(axisParent[0], axisParent[1], axisParent[2]).applyQuaternion(_q1).normalize();
         return _deltaPos.dot(_axWorld);
     }
-    _restInv.set(restRelQuat[0], restRelQuat[1], restRelQuat[2], restRelQuat[3]).invert();
-    _qRel.copy(_q1).invert().multiply(_q2).premultiply(_restInv).normalize();
+    _qRel.copy(_q1).invert().multiply(_q2).normalize();
     if (_qRel.w < 0)
         _qRel.set(-_qRel.x, -_qRel.y, -_qRel.z, -_qRel.w);
     const sinHalf = _qRel.x * axisParent[0] + _qRel.y * axisParent[1] + _qRel.z * axisParent[2];
@@ -140,7 +147,6 @@ export function buildJointRuntime(params: {
     object: THREE.Object3D;
     axisParent: readonly [number, number, number];
     anchorParent: readonly [number, number, number];
-    restRelQuat: readonly [number, number, number, number];
     limits: [number, number] | null;
     drive: KhrJointDriveSpec | null;
     breakaway?: KhrBreakawaySpec;
@@ -148,7 +154,7 @@ export function buildJointRuntime(params: {
     parentBody: RAPIER.RigidBody;
     childBody: RAPIER.RigidBody;
 }): JointRuntime {
-    const { rapier, world, nodeName, role, kind, object, axisParent, anchorParent, restRelQuat, limits, drive, breakaway, rapierJoint, parentBody, childBody } = params;
+    const { rapier, world, nodeName, role, kind, object, axisParent, anchorParent, limits, drive, breakaway, rapierJoint, parentBody, childBody } = params;
     const rt: JointRuntime = {
         nodeName,
         role,
@@ -164,7 +170,7 @@ export function buildJointRuntime(params: {
         childBody,
         unlatched: false,
         detached: false,
-        getCoordinate: () => measureJointCoordinate(rt.parentBody, rt.childBody, kind, axisParent, anchorParent, restRelQuat),
+        getCoordinate: () => measureJointCoordinate(rt.parentBody, rt.childBody, kind, axisParent, anchorParent),
         applyTarget: (target: number) => {
             if (rt.detached || !rt.rapierJoint)
                 return;
@@ -196,10 +202,9 @@ export function buildJointRuntime(params: {
                 }
                 for (let i = 0; i < childBody.numColliders(); i++) {
                     const col = childBody.collider(i);
-                    const cg = col.collisionGroups();
-                    if (cg === VEHICLE_PANEL_INTERACTION_GROUPS || cg === 0x4000bfff) {
-                        col.setCollisionGroups(0xffffffff);
-                        col.setSolverGroups(0xffffffff);
+                    if (col.collisionGroups() === ATTACHED_PANEL_INTERACTION_GROUPS) {
+                        col.setCollisionGroups(DETACHED_PANEL_INTERACTION_GROUPS);
+                        col.setSolverGroups(DETACHED_PANEL_INTERACTION_GROUPS);
                     }
                 }
                 if (childBody.isDynamic())
@@ -221,4 +226,15 @@ export function buildJointRuntime(params: {
         },
     };
     return rt;
+}
+
+export function openTargetForLimits(limits: readonly [number, number]): number {
+    return Math.abs(limits[0]) > Math.abs(limits[1]) ? limits[0] : limits[1];
+}
+
+export function isJointOpen(rt: JointRuntime): boolean {
+    if (!rt.limits)
+        return false;
+    const openTgt = openTargetForLimits(rt.limits);
+    return Math.abs(openTgt) > 1e-6 && Math.abs((rt.positionTarget ?? rt.getCoordinate()) - openTgt) < Math.abs(openTgt) * 0.5;
 }

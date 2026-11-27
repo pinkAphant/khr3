@@ -9,8 +9,14 @@ import {
     TrimeshCollider,
     type RapierCollider,
 } from "@react-three/rapier";
-import type { ColliderMass } from "./assemblyPlan.js";
-import type { KhrColliderSpec, KhrCombineMode } from "./khrTypes.js";
+import { assignRef, type KhrColliderSpec, type KhrCombineMode } from "./types.js";
+
+export interface ColliderMass {
+    mass: number;
+    centerOfMass: { x: number; y: number; z: number };
+    principalAngularInertia: { x: number; y: number; z: number };
+    angularInertiaLocalFrame: { x: number; y: number; z: number; w: number };
+}
 
 const COMBINE_RULES: Record<KhrCombineMode, CoefficientCombineRule> = {
     average: CoefficientCombineRule.Average,
@@ -21,34 +27,39 @@ const COMBINE_RULES: Record<KhrCombineMode, CoefficientCombineRule> = {
 
 export interface KhrColliderProps {
     c: KhrColliderSpec;
-    /** Pose override in the parent RigidBody frame; defaults to the authored KHR collider offset. */
     position?: [number, number, number];
     quaternion?: [number, number, number, number];
-    /** Authored body mass carried declaratively by this collider (`density: 0` when omitted). */
     massProperties?: ColliderMass;
-    /** Fallback Rapier collision groups when `c.collisionGroups` is omitted. */
     collisionGroups?: number;
-    /** Fallback Rapier solver groups when `c.collisionGroups` is omitted. */
     solverGroups?: number;
     ref?: React.Ref<RapierCollider>;
 }
 
-export function KhrCollider({ c, position, quaternion, massProperties, collisionGroups, solverGroups, ref }: KhrColliderProps): React.JSX.Element {
+export function KhrCollider({
+    c,
+    position,
+    quaternion,
+    massProperties,
+    collisionGroups,
+    solverGroups,
+    ref,
+}: KhrColliderProps): React.JSX.Element {
     const innerRef = useRef<RapierCollider | null>(null);
-    const setRef = useCallback((node: RapierCollider | null) => {
-        innerRef.current = node;
-        if (typeof ref === "function")
-            ref(node);
-        else if (ref)
-            (ref as React.MutableRefObject<RapierCollider | null>).current = node;
-    }, [ref]);
-    // Rapier WASM only auto-flushes dirty collider mass flags inside world.step(); flush once after
-    // @react-three/rapier's AnyCollider useEffect so body.mass() is already exact before step 0.
+    const setRef = useCallback(
+        (node: RapierCollider | null) => {
+            innerRef.current = node;
+            assignRef(ref, node);
+        },
+        [ref],
+    );
+
     useEffect(() => {
         innerRef.current?.parent()?.recomputeMassPropertiesFromColliders();
     }, [c, massProperties]);
+
     const effCollisionGroups = c.collisionGroups ?? collisionGroups;
-    const effSolverGroups = c.collisionGroups === undefined ? solverGroups : undefined;
+    const effSolverGroups = solverGroups ?? effCollisionGroups;
+
     const common = {
         ref: setRef,
         position: position ?? c.localPosition,
@@ -61,6 +72,7 @@ export function KhrCollider({ c, position, quaternion, massProperties, collision
         ...(effCollisionGroups === undefined ? {} : { collisionGroups: effCollisionGroups }),
         ...(effSolverGroups === undefined ? {} : { solverGroups: effSolverGroups }),
     };
+
     const { shape } = c;
     if (shape.type === "box") {
         const [sx, sy, sz] = shape.size;

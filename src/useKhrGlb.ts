@@ -1,34 +1,30 @@
 import { useMemo } from "react";
 import { useLoader } from "@react-three/fiber";
-import type { GLTFLoaderPlugin, GLTFParser } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { cloneKhrBundle } from "./khrClone.js";
-import {
-    KHR_BUNDLE_USERDATA_KEY,
-    applyKhrCustomExtractors,
-    createHeadlessTexturePlugin,
-    createKhrGltfPlugin,
-    isHeadlessTextureEnv,
-} from "./khrPlugin.js";
-import { type KhrAssetBundle, KhrValidationError, type UseKhrGlbOptions } from "./khrTypes.js";
+import { GLTFLoader, type GLTFLoaderPlugin, type GLTFParser } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { cloneKhrBundle } from "./clone.js";
+import { KHR_BUNDLE_USERDATA_KEY, applyKhrCustomExtractors, createKhrGltfPlugin } from "./loader.js";
+import { type KhrAssetBundle, KhrValidationError, type UseKhrGlbOptions } from "./types.js";
 
-class KhrGLTFLoader extends GLTFLoader {
-    static khrLoaderScope = Symbol("KhrGLTFLoader");
+export class KhrGLTFLoader extends GLTFLoader {
+    static readonly khrLoaderScope = Symbol("KhrGLTFLoader");
 }
 
-const headlessPlugin = createHeadlessTexturePlugin();
+interface ScopedLoaderEntry {
+    readonly Proto: typeof GLTFLoader;
+    readonly registerExtensions: (loader: GLTFLoader) => void;
+}
+
 const khrPlugin = createKhrGltfPlugin();
 const configuredLoaders = new WeakSet<GLTFLoader>();
 const customExtendedLoaders = new WeakSet<GLTFLoader>();
-const customLoaderRegistry = new Map<string, Map<string, { loader: GLTFLoader; registerExtensions: (loader: GLTFLoader) => void }>>();
+const fnIds = new WeakMap<NonNullable<UseKhrGlbOptions["extendLoader"]>, number>();
+let nextFnId = 1;
+const scopedRegistry = new Map<string, Map<string, ScopedLoaderEntry>>();
 
 function configureKhrLoader(loader: GLTFLoader): void {
     if (configuredLoaders.has(loader))
         return;
     configuredLoaders.add(loader);
-    if (isHeadlessTextureEnv()) {
-        loader.register(headlessPlugin as (parser: GLTFParser) => GLTFLoaderPlugin);
-    }
     loader.register(khrPlugin as (parser: GLTFParser) => GLTFLoaderPlugin);
 }
 
@@ -37,24 +33,34 @@ function hasCustomLoaderOpts(options?: UseKhrGlbOptions): options is UseKhrGlbOp
 }
 
 function getLoaderCacheKey(options: UseKhrGlbOptions): string {
-    return options.cacheKey === undefined
-        ? `src:${Function.prototype.toString.call(options.extendLoader)}`
-        : `key:${options.cacheKey}`;
+    if (options.cacheKey !== undefined)
+        return `key:${options.cacheKey}`;
+    const fn = options.extendLoader!;
+    let id = fnIds.get(fn);
+    if (id === undefined) {
+        id = nextFnId++;
+        fnIds.set(fn, id);
+    }
+    return `fn:${id}`;
 }
 
-function getScopedLoaderEntry(url: string, options: UseKhrGlbOptions): { loader: GLTFLoader; registerExtensions: (loader: GLTFLoader) => void } {
+export function createScopedGltfLoaderClass(): typeof GLTFLoader {
+    return class ScopedKhrGLTFLoader extends GLTFLoader {};
+}
+
+function getScopedLoaderEntry(url: string, options: UseKhrGlbOptions): ScopedLoaderEntry {
     const key = getLoaderCacheKey(options);
-    let urlMap = customLoaderRegistry.get(url);
+    let urlMap = scopedRegistry.get(url);
     if (!urlMap) {
         urlMap = new Map();
-        customLoaderRegistry.set(url, urlMap);
+        scopedRegistry.set(url, urlMap);
     }
     let entry = urlMap.get(key);
     if (!entry) {
-        const loader = new GLTFLoader();
+        const Proto = createScopedGltfLoaderClass();
         const extend = options.extendLoader;
-        const created = {
-            loader,
+        const created: ScopedLoaderEntry = {
+            Proto,
             registerExtensions: (target: GLTFLoader) => {
                 configureKhrLoader(target);
                 if (extend && !customExtendedLoaders.has(target)) {
@@ -63,11 +69,11 @@ function getScopedLoaderEntry(url: string, options: UseKhrGlbOptions): { loader:
                         customExtendedLoaders.add(target);
                     }
                     catch (err) {
-                        const map = customLoaderRegistry.get(url);
+                        const map = scopedRegistry.get(url);
                         if (map?.get(key) === created) {
                             map.delete(key);
                             if (map.size === 0)
-                                customLoaderRegistry.delete(url);
+                                scopedRegistry.delete(url);
                         }
                         throw err;
                     }
@@ -84,9 +90,9 @@ export function useKhrGlb(url: string, options?: UseKhrGlbOptions): KhrAssetBund
     const extractRole = options?.extractRole;
     const isSocketNode = options?.isSocketNode;
     const scoped = hasCustomLoaderOpts(options) ? getScopedLoaderEntry(url, options) : null;
-    const loader = scoped ? scoped.loader : KhrGLTFLoader;
+    const Proto = scoped ? scoped.Proto : KhrGLTFLoader;
     const reg = scoped ? scoped.registerExtensions : configureKhrLoader;
-    const gltf = useLoader(loader as typeof GLTFLoader, url, reg);
+    const gltf = useLoader(Proto, url, reg);
     const template = gltf.userData[KHR_BUNDLE_USERDATA_KEY] as KhrAssetBundle | undefined;
     if (!template)
         throw new KhrValidationError(`useKhrGlb: missing "${KHR_BUNDLE_USERDATA_KEY}" on loaded GLTF for "${url}"`);
@@ -101,33 +107,33 @@ export function useKhrGlb(url: string, options?: UseKhrGlbOptions): KhrAssetBund
 export namespace useKhrGlb {
     export const preload = (url: string, options?: UseKhrGlbOptions): void => {
         const scoped = hasCustomLoaderOpts(options) ? getScopedLoaderEntry(url, options) : null;
-        const loader = scoped ? scoped.loader : KhrGLTFLoader;
+        const Proto = scoped ? scoped.Proto : KhrGLTFLoader;
         const reg = scoped ? scoped.registerExtensions : configureKhrLoader;
-        useLoader.preload(loader as typeof GLTFLoader, url, reg);
+        useLoader.preload(Proto, url, reg);
     };
 
     export const clear = (url: string, options?: UseKhrGlbOptions): void => {
         if (hasCustomLoaderOpts(options)) {
-            const urlMap = customLoaderRegistry.get(url);
+            const urlMap = scopedRegistry.get(url);
             if (!urlMap)
                 return;
             const key = getLoaderCacheKey(options);
             const entry = urlMap.get(key);
             if (entry) {
-                useLoader.clear(entry.loader as unknown as typeof GLTFLoader, url);
+                useLoader.clear(entry.Proto, url);
                 urlMap.delete(key);
                 if (urlMap.size === 0)
-                    customLoaderRegistry.delete(url);
+                    scopedRegistry.delete(url);
             }
         }
         else {
-            useLoader.clear(KhrGLTFLoader as typeof GLTFLoader, url);
+            useLoader.clear(KhrGLTFLoader, url);
             if (options === undefined) {
-                const urlMap = customLoaderRegistry.get(url);
+                const urlMap = scopedRegistry.get(url);
                 if (urlMap) {
                     for (const entry of urlMap.values())
-                        useLoader.clear(entry.loader as unknown as typeof GLTFLoader, url);
-                    customLoaderRegistry.delete(url);
+                        useLoader.clear(entry.Proto, url);
+                    scopedRegistry.delete(url);
                 }
             }
         }
