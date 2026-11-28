@@ -31,7 +31,7 @@ export {
 } from "./types.js";
 export { createKhrGltfPlugin, loadKhrGlb } from "./loader.js";
 export { exportKhrGlb, patchGlbJsonChunk } from "./exporter.js";
-export type { MutableGltfJson, RawGltfJson } from "./glb.js";
+export { ensureHeadlessFileReader, type MutableGltfJson, type RawGltfJson } from "./glb.js";
 export { claimBundleMount, cloneKhrBundle, disposeKhrBundle, releaseBundleMount, snapshotSceneWithMountedSubtrees } from "./clone.js";
 export {
     applyRapierBodyMass,

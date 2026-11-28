@@ -1,6 +1,6 @@
 {
   "name": "@khr3/core",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "description": "KHR_physics_rigid_bodies + KHR_implicit_shapes loader, exporter, Rapier assembly and ecctrl vehicle rig for React Three Fiber",
   "license": "MIT",
   "type": "module",

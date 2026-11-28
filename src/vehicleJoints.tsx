@@ -1,13 +1,12 @@
-import React, { useCallback, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import React, { useCallback, useImperativeHandle, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { useFrame } from "@react-three/fiber";
-import { RigidBody, useRapier, type RapierRigidBody, type RigidBodyProps } from "@react-three/rapier";
+import { useRapier, type RapierRigidBody, type RigidBodyProps } from "@react-three/rapier";
 import type RAPIER from "@dimforge/rapier3d-compat";
 import { useCustomGravity } from "@pinkaphant/ecctrl/gravity";
 import type { EcctrlVehicleHandle } from "@pinkaphant/ecctrl/vehicle";
-import { MountSubtreeSlot, captureSubtreeOrigins, type SubtreeOrigin } from "./clone.js";
+import { captureSubtreeOrigins } from "./clone.js";
 import {
-    applyRapierBodyMass,
     bodyPoseMatrix,
     computeLumpedMassProps,
     type LumpedMassProps,
@@ -16,17 +15,13 @@ import {
 } from "./inertia.js";
 import {
     ATTACHED_PANEL_INTERACTION_GROUPS,
-    buildJointRuntime,
     closedTargetForLimits,
-    createRapierImpulseJoint,
     isJointOpen,
     openTargetForLimits,
     toggleDrivenJoint,
 } from "./joints.js";
-import { type PlannedCollider } from "./KhrAssembly.js";
-import { KhrCollider } from "./KhrCollider.js";
+import { ArticulatedPartBody, type PlannedCollider } from "./KhrAssembly.js";
 import {
-    JointRegistryContext,
     type JointRuntime,
     type KhrBodySpec,
     type KhrJointSpec,
@@ -53,6 +48,8 @@ export interface PlannedVehiclePart {
     parent: PlannedVehiclePart | null;
     restRelParentPos: Vec3Tuple;
     restRelParentQuat: QuatTuple;
+    restRelRootPos: Vec3Tuple;
+    restRelRootQuat: QuatTuple;
     restRelChassisPos: Vec3Tuple;
     restRelChassisQuat: QuatTuple;
     axisParent: Vec3Tuple;
@@ -140,13 +137,16 @@ export function planVehicleJointParts(bodies: readonly KhrBodySpec[]): PlannedVe
             };
         });
 
+        const restRelPos: Vec3Tuple = [rcPos.x, rcPos.y, rcPos.z];
         const plan: PlannedVehiclePart = {
             spec: b,
             joint,
             parent,
             restRelParentPos: anchorParent,
             restRelParentQuat: rcQuatTuple,
-            restRelChassisPos: [rcPos.x, rcPos.y, rcPos.z],
+            restRelRootPos: restRelPos,
+            restRelRootQuat: rcQuatTuple,
+            restRelChassisPos: restRelPos,
             restRelChassisQuat: rcQuatTuple,
             axisParent: [axParentVec.x, axParentVec.y, axParentVec.z],
             axisChild: [axChildVec.x, axChildVec.y, axChildVec.z],
@@ -156,133 +156,6 @@ export function planVehicleJointParts(bodies: readonly KhrBodySpec[]): PlannedVe
         partByName.set(b.nodeName, plan);
         return plan;
     });
-}
-
-function VehicleArticulatedPanel({
-    part,
-    spawnPos,
-    spawnQuat,
-    linearVelocity,
-    angularVelocity,
-    gravityScale,
-    panelUserData,
-    parentBody,
-    origin,
-    onBody,
-    onJointReady,
-}: {
-    part: PlannedVehiclePart;
-    spawnPos: readonly [number, number, number];
-    spawnQuat: readonly [number, number, number, number];
-    linearVelocity?: [number, number, number];
-    angularVelocity?: [number, number, number];
-    gravityScale?: number;
-    panelUserData: Record<string, unknown>;
-    parentBody: RAPIER.RigidBody | null;
-    origin?: SubtreeOrigin;
-    onBody: (nodeName: string, rb: RapierRigidBody | null) => void;
-    onJointReady: (nodeName: string, obj: THREE.Object3D, rt: JointRuntime | null) => void;
-}): React.JSX.Element {
-    const { rapier, world } = useRapier();
-    const registry = useContext(JointRegistryContext);
-    const rtRef = useRef<JointRuntime | null>(null);
-    const [childBody, setChildBody] = useState<RapierRigidBody | null>(null);
-
-    const worldPose = useMemo(() => {
-        const sq = new THREE.Quaternion(spawnQuat[0], spawnQuat[1], spawnQuat[2], spawnQuat[3]).normalize();
-        const pos = new THREE.Vector3().fromArray(part.restRelChassisPos).applyQuaternion(sq).add(new THREE.Vector3(spawnPos[0], spawnPos[1], spawnPos[2]));
-        return { pos: [pos.x, pos.y, pos.z] as Vec3Tuple, quat: [sq.x, sq.y, sq.z, sq.w] as QuatTuple };
-    }, [part.restRelChassisPos, spawnPos, spawnQuat]);
-
-    const assignChildRef = useCallback((rb: RapierRigidBody | null) => {
-        setChildBody(rb);
-        onBody(part.spec.nodeName, rb);
-    }, [part.spec.nodeName, onBody]);
-
-    useEffect(() => () => onBody(part.spec.nodeName, null), [part.spec.nodeName, onBody]);
-
-    useEffect(() => {
-        if (childBody && part.lumpedMass)
-            applyRapierBodyMass(childBody, part.lumpedMass);
-    }, [childBody, part.lumpedMass]);
-
-    useEffect(() => {
-        if (!parentBody || !childBody)
-            return;
-        const imp = createRapierImpulseJoint(
-            rapier,
-            world,
-            parentBody,
-            childBody,
-            part.joint,
-            part.restRelParentPos,
-            [0, 0, 0],
-            part.axisParent,
-            part.axisChild,
-            part.restRelParentQuat,
-        );
-        const rt = buildJointRuntime({
-            rapier,
-            world,
-            nodeName: part.spec.nodeName,
-            role: part.joint.role,
-            kind: part.joint.kind,
-            object: part.spec.object,
-            axisParent: part.axisParent,
-            anchorParent: part.restRelParentPos,
-            limits: part.joint.limits,
-            drive: part.joint.drive,
-            breakaway: part.spec.breakaway,
-            rapierJoint: imp,
-            parentBody,
-            childBody,
-        });
-        rtRef.current = rt;
-        registry?.add(rt);
-        onJointReady(rt.nodeName, part.spec.object, rt);
-        return () => {
-            rtRef.current = null;
-            registry?.delete(rt);
-            onJointReady(rt.nodeName, part.spec.object, null);
-            if (rt.rapierJoint && world.getImpulseJoint(rt.rapierJoint.handle))
-                world.removeImpulseJoint(rt.rapierJoint, true);
-        };
-    }, [rapier, world, part, parentBody, childBody, registry, onJointReady]);
-
-    const onForce = useMemo(
-        () =>
-            part.spec.breakaway
-                ? (p: { totalForceMagnitude: number }) => {
-                    if (world.timestep > 0)
-                        rtRef.current?.applyImpactImpulse(p.totalForceMagnitude * world.timestep);
-                }
-                : undefined,
-        [part.spec.breakaway, world],
-    );
-
-    const linVel = part.spec.linearVelocity ?? linearVelocity;
-    const angVel = part.spec.angularVelocity ?? angularVelocity;
-    const gravScale = part.spec.gravityFactor ?? gravityScale;
-
-    return (
-        <RigidBody
-            ref={assignChildRef}
-            type={part.spec.isKinematic ? "kinematicPosition" : "dynamic"}
-            position={worldPose.pos}
-            quaternion={worldPose.quat}
-            colliders={false}
-            userData={panelUserData}
-            onContactForce={onForce}
-            {...(linVel ? { linearVelocity: linVel } : {})}
-            {...(angVel ? { angularVelocity: angVel } : {})}
-            {...(gravScale === undefined ? {} : { gravityScale: gravScale })}
-        >
-            <MountSubtreeSlot object={part.spec.object} position={[0, 0, 0]} quaternion={part.restRelChassisQuat} origin={origin} />
-            {part.colliders.map((col, cIdx) => (
-                <KhrCollider key={`vj_${part.spec.nodeName}:${cIdx}`} c={col.spec} position={col.position} quaternion={col.quaternion} />
-            ))}
-        </RigidBody>
-    );
 }
 
 const _pPos = new THREE.Vector3();
@@ -440,15 +313,15 @@ export function KhrVehicleJoints({
     return (
         <>
             {parts.map((part) => (
-                <VehicleArticulatedPanel
+                <ArticulatedPartBody
                     key={part.spec.nodeName}
                     part={part}
-                    spawnPos={spawnPos}
-                    spawnQuat={spawnQuat}
+                    rootPos={spawnPos}
+                    rootQuat={spawnQuat}
                     linearVelocity={linearVelocity}
                     angularVelocity={angularVelocity}
                     gravityScale={gravityScale}
-                    panelUserData={panelUserData}
+                    userData={panelUserData}
                     parentBody={part.parent ? (partBodies.get(part.parent.spec.nodeName) ?? null) : (chassisBody ?? vehicleRef.current?.body ?? null)}
                     origin={origins?.get(part.spec.object)}
                     onBody={handleBody}

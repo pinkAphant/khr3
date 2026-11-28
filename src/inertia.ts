@@ -377,10 +377,12 @@ function integrateSurfaceShellProps(vertices: Float32Array, indices: Uint32Array
     const cyz = syz24 / (24 * area) - comRelY * comRelZ;
 
     // A planar thin lamina has zero thickness along its normal (`cxx` along normal = 0, so the two tangent axes have positive inertia and normal axis = sum > 0).
-    // Guard against exact numerical zero only on 1D degenerate strips.
-    const ixx = Math.max(cyy + czz, 1e-9);
-    const iyy = Math.max(cxx + czz, 1e-9);
-    const izz = Math.max(cxx + cyy, 1e-9);
+    const ixx = cyy + czz;
+    const iyy = cxx + czz;
+    const izz = cxx + cyy;
+    if (!(ixx > 1e-12 && iyy > 1e-12 && izz > 1e-12)) {
+        throw new KhrValidationError(`Collider mesh "${label}" is degenerate (1D collinear strip); cannot compute positive 3D inertia`);
+    }
 
     return {
         measure: area,
@@ -402,6 +404,78 @@ function deduplicateQuantizedPoints(vertices: Float32Array): THREE.Vector3[] {
         }
     }
     return pts;
+}
+
+/**
+ * Exact 2D Andrew Monotone Chain convex hull in the best-fit plane of coplanar 3D points `pts`,
+ * returning CCW-ordered perimeter vertices so triangle fan integration never self-intersects.
+ */
+function buildCoplanarConvexPolygon(pts: readonly THREE.Vector3[], label: string): Float32Array {
+    const p0 = pts[0];
+    let bestNormal = new THREE.Vector3();
+    let bestNormSq = 0;
+    const e1 = new THREE.Vector3();
+    const e2 = new THREE.Vector3();
+    const nCand = new THREE.Vector3();
+    for (let i = 1; i < pts.length; i++) {
+        e1.subVectors(pts[i], p0);
+        for (let j = i + 1; j < pts.length; j++) {
+            e2.subVectors(pts[j], p0);
+            nCand.crossVectors(e1, e2);
+            const sq = nCand.lengthSq();
+            if (sq > bestNormSq) {
+                bestNormSq = sq;
+                bestNormal.copy(nCand);
+            }
+        }
+    }
+    if (!(bestNormSq > 1e-20)) {
+        throw new KhrValidationError(`ConvexHull collider "${label}" has collinear vertices (zero 2D hull area)`);
+    }
+    bestNormal.normalize();
+    const axisU = new THREE.Vector3();
+    if (Math.abs(bestNormal.x) < 0.9)
+        axisU.set(1, 0, 0).cross(bestNormal).normalize();
+    else
+        axisU.set(0, 1, 0).cross(bestNormal).normalize();
+    const axisV = new THREE.Vector3().crossVectors(bestNormal, axisU).normalize();
+
+    const projected = pts.map((p) => {
+        const d = e1.subVectors(p, p0);
+        return { u: d.dot(axisU), v: d.dot(axisV), p };
+    });
+    projected.sort((a, b) => (a.u !== b.u ? a.u - b.u : a.v - b.v));
+
+    const cross2 = (o: { u: number; v: number }, a: { u: number; v: number }, b: { u: number; v: number }): number =>
+        (a.u - o.u) * (b.v - o.v) - (a.v - o.v) * (b.u - o.u);
+
+    const lower: typeof projected = [];
+    for (const pt of projected) {
+        while (lower.length >= 2 && cross2(lower[lower.length - 2], lower[lower.length - 1], pt) <= 1e-12)
+            lower.pop();
+        lower.push(pt);
+    }
+    const upper: typeof projected = [];
+    for (let i = projected.length - 1; i >= 0; i--) {
+        const pt = projected[i];
+        while (upper.length >= 2 && cross2(upper[upper.length - 2], upper[upper.length - 1], pt) <= 1e-12)
+            upper.pop();
+        upper.push(pt);
+    }
+    lower.pop();
+    upper.pop();
+    const hull = [...lower, ...upper];
+    if (hull.length < 3) {
+        throw new KhrValidationError(`ConvexHull collider "${label}" has fewer than 3 non-collinear hull vertices`);
+    }
+    const fanVerts = new Float32Array((hull.length - 2) * 9);
+    let o = 0;
+    for (let i = 1; i + 1 < hull.length; i++) {
+        fanVerts[o++] = hull[0].p.x; fanVerts[o++] = hull[0].p.y; fanVerts[o++] = hull[0].p.z;
+        fanVerts[o++] = hull[i].p.x; fanVerts[o++] = hull[i].p.y; fanVerts[o++] = hull[i].p.z;
+        fanVerts[o++] = hull[i + 1].p.x; fanVerts[o++] = hull[i + 1].p.y; fanVerts[o++] = hull[i + 1].p.z;
+    }
+    return fanVerts;
 }
 
 function unitInertiaForShape(shape: KhrColliderShape): ShapeUnitMassProps {
@@ -446,14 +520,7 @@ function unitInertiaForShape(shape: KhrColliderShape): ShapeUnitMassProps {
             }
         }
         if (pts.length >= 3) {
-            const fanVerts = new Float32Array((pts.length - 2) * 9);
-            let o = 0;
-            for (let i = 1; i + 1 < pts.length; i++) {
-                fanVerts[o++] = pts[0].x; fanVerts[o++] = pts[0].y; fanVerts[o++] = pts[0].z;
-                fanVerts[o++] = pts[i].x; fanVerts[o++] = pts[i].y; fanVerts[o++] = pts[i].z;
-                fanVerts[o++] = pts[i + 1].x; fanVerts[o++] = pts[i + 1].y; fanVerts[o++] = pts[i + 1].z;
-            }
-            return integrateSurfaceShellProps(fanVerts, null, shape.meshNodeName);
+            return integrateSurfaceShellProps(buildCoplanarConvexPolygon(pts, shape.meshNodeName), null, shape.meshNodeName);
         }
         throw new KhrValidationError(`ConvexHull collider "${shape.meshNodeName}" has fewer than 3 distinct vertices`);
     }

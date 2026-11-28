@@ -241,6 +241,23 @@ describe("@khr3/core physics, glTF round-trip, inertia math, and Rapier WASM joi
         assert.ok(Math.abs(shellI[1] - (12 * 4) / 12) < 1e-5);
         assert.ok(Math.abs(shellI[2] - (12 * 13) / 12) < 1e-5);
 
+        // Scrambled + interior-point coplanar convexHull MUST sort via 2D Monotone Chain to exact rectangle inertia!
+        const scrambledCoplanar = new Float32Array([
+            0, 0, 0,       // interior point
+            1, 1.5, 0,     // TR
+            -1, -1.5, 0,   // BL (diagonal opposite!)
+            0.3, -0.4, 0,  // interior point
+            -1, 1.5, 0,    // TL
+            1, -1.5, 0,    // BR
+        ]);
+        const coplanarHullI = computeShapeInertia(
+            { type: "convexHull", vertices: scrambledCoplanar, meshNodeName: "ScrambledPlate" },
+            12,
+        );
+        assert.ok(Math.abs(coplanarHullI[0] - 9) < 1e-5, `Expected Ixx=9, got ${coplanarHullI[0]}`);
+        assert.ok(Math.abs(coplanarHullI[1] - 4) < 1e-5, `Expected Iyy=4, got ${coplanarHullI[1]}`);
+        assert.ok(Math.abs(coplanarHullI[2] - 13) < 1e-5, `Expected Izz=13, got ${coplanarHullI[2]}`);
+
         // Collinear zero-area vertices MUST throw KhrValidationError (never fake AABB or 0.04*mass!)
         const collinear = new Float32Array([0, 0, 0, 1, 0, 0, 2, 0, 0]);
         assert.throws(

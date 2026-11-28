@@ -233,22 +233,37 @@ export type AssemblyRigidBodyProps = Omit<
     "type" | "position" | "rotation" | "quaternion" | "colliders" | "children" | "ref"
 >;
 
-function ArticulatedPartBody({
+export function ArticulatedPartBody({
     part,
-    rootSpec,
     rootPos,
     rootQuat,
+    linearVelocity,
+    angularVelocity,
+    gravityScale,
     parentBody,
     userData,
     origin,
     onBody,
     onJointReady,
 }: {
-    part: PartPlan;
-    rootSpec: RootPlan["spec"];
+    part: {
+        readonly spec: KhrBodySpec;
+        readonly joint: KhrJointSpec;
+        readonly restRelParentPos: Vec3;
+        readonly restRelParentQuat: Quat;
+        readonly restRelRootPos: Vec3;
+        readonly restRelRootQuat: Quat;
+        readonly axisParent: Vec3;
+        readonly axisChild: Vec3;
+        readonly lumpedMass: LumpedMassProps | null;
+        readonly colliders: readonly PlannedCollider[];
+    };
     rootPos: readonly [number, number, number];
     rootQuat: readonly [number, number, number, number];
-    parentBody: RapierRigidBody | null;
+    linearVelocity?: [number, number, number];
+    angularVelocity?: [number, number, number];
+    gravityScale?: number;
+    parentBody: RAPIER_RigidBodyLike | null;
     userData?: RigidBodyProps["userData"];
     origin?: SubtreeOrigin;
     onBody: (nodeName: string, rb: RapierRigidBody | null) => void;
@@ -256,7 +271,6 @@ function ArticulatedPartBody({
 }): React.JSX.Element {
     const { rapier, world } = useRapier();
     const registry = useContext(JointRegistryContext);
-    const childRef = useRef<RapierRigidBody | null>(null);
     const rtRef = useRef<JointRuntime | null>(null);
     const [childBody, setChildBody] = React.useState<RapierRigidBody | null>(null);
 
@@ -270,7 +284,6 @@ function ArticulatedPartBody({
     }, [part.restRelRootPos, rootPos, rootQuat]);
 
     const assignChildRef = useCallback((rb: RapierRigidBody | null) => {
-        childRef.current = rb;
         setChildBody(rb);
         onBody(part.spec.nodeName, rb);
     }, [part.spec.nodeName, onBody]);
@@ -288,7 +301,7 @@ function ArticulatedPartBody({
         const imp = createRapierImpulseJoint(
             rapier,
             world,
-            parentBody,
+            parentBody as RapierRigidBody,
             childBody,
             part.joint,
             part.restRelParentPos,
@@ -310,7 +323,7 @@ function ArticulatedPartBody({
             drive: part.joint.drive,
             breakaway: part.spec.breakaway,
             rapierJoint: imp,
-            parentBody,
+            parentBody: parentBody as RapierRigidBody,
             childBody,
         });
         rtRef.current = rt;
@@ -336,9 +349,9 @@ function ArticulatedPartBody({
         [part.spec.breakaway, world],
     );
 
-    const linVel = part.spec.linearVelocity ?? rootSpec.linearVelocity;
-    const angVel = part.spec.angularVelocity ?? rootSpec.angularVelocity;
-    const gravScale = part.spec.gravityFactor ?? rootSpec.gravityFactor;
+    const linVel = part.spec.linearVelocity ?? linearVelocity;
+    const angVel = part.spec.angularVelocity ?? angularVelocity;
+    const gravScale = part.spec.gravityFactor ?? gravityScale;
 
     return (
         <RigidBody
@@ -365,6 +378,8 @@ function ArticulatedPartBody({
         </RigidBody>
     );
 }
+
+type RAPIER_RigidBodyLike = { readonly handle: number };
 
 function AssemblyRootBody({
     plan,
@@ -446,9 +461,11 @@ function AssemblyRootBody({
                 <ArticulatedPartBody
                     key={part.spec.nodeName}
                     part={part}
-                    rootSpec={rootSpec}
                     rootPos={position}
                     rootQuat={quaternion}
+                    linearVelocity={rootSpec.linearVelocity}
+                    angularVelocity={rootSpec.angularVelocity}
+                    gravityScale={rootSpec.gravityFactor}
                     parentBody={part.parent ? (partBodies.get(part.parent.spec.nodeName) ?? null) : rootBody}
                     userData={rigidBodyProps?.userData}
                     origin={partOrigins?.get(part.spec.object)}
