@@ -10,6 +10,7 @@ import {
     assertUnitScale,
     bodyPoseMatrix,
     computeLumpedMassProps,
+    isLiveRapierBody,
     type LumpedMassProps,
 } from "./inertia.js";
 import { buildJointRuntime, createRapierImpulseJoint, toggleDrivenJoint } from "./joints.js";
@@ -291,12 +292,12 @@ export function ArticulatedPartBody({
     useEffect(() => () => onBody(part.spec.nodeName, null), [part.spec.nodeName, onBody]);
 
     useEffect(() => {
-        if (childBody && part.lumpedMass)
-            applyRapierBodyMass(childBody, part.lumpedMass);
-    }, [childBody, part.lumpedMass]);
+        if (childBody && part.lumpedMass && isLiveRapierBody(world, childBody))
+            applyRapierBodyMass(childBody, part.lumpedMass, world);
+    }, [world, childBody, part.lumpedMass]);
 
     useEffect(() => {
-        if (!parentBody || !childBody)
+        if (!parentBody || !childBody || !isLiveRapierBody(world, parentBody) || !isLiveRapierBody(world, childBody))
             return;
         const imp = createRapierImpulseJoint(
             rapier,
@@ -333,7 +334,7 @@ export function ArticulatedPartBody({
             rtRef.current = null;
             registry?.delete(rt);
             onJointReady(rt.nodeName, part.spec.object, null);
-            if (rt.rapierJoint && world.getImpulseJoint(rt.rapierJoint.handle))
+            if (rt.rapierJoint && world.getImpulseJoint(rt.rapierJoint.handle) === rt.rapierJoint)
                 world.removeImpulseJoint(rt.rapierJoint, true);
         };
     }, [rapier, world, part, parentBody, childBody, registry, onJointReady]);
@@ -402,6 +403,7 @@ function AssemblyRootBody({
     onJointReady: (nodeName: string, obj: THREE.Object3D, rt: JointRuntime | null) => void;
     children?: React.ReactNode;
 }): React.JSX.Element {
+    const { world } = useRapier();
     const [rootBody, setRootBody] = React.useState<RapierRigidBody | null>(null);
     const [partBodies, setPartBodies] = React.useState<ReadonlyMap<string, RapierRigidBody>>(() => new Map());
 
@@ -419,9 +421,9 @@ function AssemblyRootBody({
     useEffect(() => () => onBody(rootSpec.nodeName, null), [rootSpec.nodeName, onBody]);
 
     useEffect(() => {
-        if (rootBody && plan.lumpedMass)
-            applyRapierBodyMass(rootBody, plan.lumpedMass);
-    }, [rootBody, plan.lumpedMass]);
+        if (rootBody && plan.lumpedMass && isLiveRapierBody(world, rootBody))
+            applyRapierBodyMass(rootBody, plan.lumpedMass, world);
+    }, [world, rootBody, plan.lumpedMass]);
 
     const handlePartBody = useCallback((nodeName: string, rb: RapierRigidBody | null) => {
         setPartBodies((prev) => {
@@ -609,7 +611,7 @@ export function KhrAssembly({
         if (!enableCustomGravity || world.timestep <= 0)
             return;
         for (const rb of bodiesRef.current.values()) {
-            if (rb.isDynamic())
+            if (isLiveRapierBody(world, rb) && rb.isDynamic())
                 applyGravityField(rb, world.timestep);
         }
     });

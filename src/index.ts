@@ -40,6 +40,8 @@ export {
     assertUnitScale,
     computeLumpedMassProps,
     computeShapeInertia,
+    isLiveRapierBody,
+    isLiveRapierCollider,
     jacobiPrincipalInertia,
     resolveBodyMassFromColliders,
     type LumpedMassProps,

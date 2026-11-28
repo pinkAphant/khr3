@@ -213,7 +213,7 @@ export function KhrHeightfield({
 
     useEffect(() => {
         const rb = rbRef.current;
-        if (!rb || !world.getRigidBody(rb.handle))
+        if (!rb || world.getRigidBody(rb.handle) !== rb)
             return;
         const colHeights = layout === "row-major"
             ? transposeHeightfieldForRapier(heights, nrows, ncols)
@@ -236,7 +236,7 @@ export function KhrHeightfield({
         assignRef(colliderRef, col);
         return () => {
             assignRef(colliderRef, null);
-            if (world.getCollider(col.handle))
+            if (world.getCollider(col.handle) === col)
                 world.removeCollider(col, false);
         };
     }, [rapier, world, heights, nrows, ncols, sizeX, sizeZ, layout, friction, restitution, collisionGroups, solverGroups, version, colliderRef]);

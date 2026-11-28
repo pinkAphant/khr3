@@ -29,6 +29,7 @@ import {
     assertUnitScale,
     bodyPoseMatrix,
     computeLumpedMassProps,
+    isLiveRapierBody,
     type LumpedMassProps,
     type QuatTuple,
     type Vec3Tuple,
@@ -407,9 +408,9 @@ export function KhrVehicle({ scale, colliders, bundle, ...rest }: KhrVehicleProp
     const collidersList = useMemo(() => buildChassisColliders(bundle.bodies), [bundle.bodies]);
 
     useEffect(() => {
-        if (chassisBody)
-            applyRapierBodyMass(chassisBody, chassis.lumpedMass);
-    }, [chassisBody, chassis.lumpedMass]);
+        if (chassisBody && isLiveRapierBody(world, chassisBody))
+            applyRapierBodyMass(chassisBody, chassis.lumpedMass, world);
+    }, [world, chassisBody, chassis.lumpedMass]);
 
     const solvedWheels = useMemo(
         () => solveWheelLoads(bundle.wheels, bundle.totalDynamicMass, bundle.centerOfMass, 0.7, refGrav),
@@ -447,17 +448,18 @@ export function KhrVehicle({ scale, colliders, bundle, ...rest }: KhrVehicleProp
 
     useFrame(() => {
         const handle = innerRef.current;
-        if (handle?.body && handle.body !== chassisBody)
-            setChassisBody(handle.body);
+        const liveChassis = handle?.body && isLiveRapierBody(world, handle.body) ? handle.body : null;
+        if (liveChassis && liveChassis !== chassisBody)
+            setChassisBody(liveChassis);
         if (!enable)
             return;
         let gSq: number;
         if (enableCustomGravity) {
-            if (handle?.body && !handle.body.isSleeping()) {
-                gSq = handle.gravityMag * handle.gravityMag;
+            if (liveChassis && !liveChassis.isSleeping()) {
+                gSq = handle!.gravityMag * handle!.gravityMag;
             }
             else {
-                const t = handle?.body?.translation();
+                const t = liveChassis?.translation();
                 if (t)
                     _samplePos.set(t.x, t.y, t.z);
                 else
@@ -496,7 +498,7 @@ export function KhrVehicle({ scale, colliders, bundle, ...rest }: KhrVehicleProp
                 const origSetMovement = handle.setMovement;
                 handle.setMovement = (state: VehicleInput) => {
                     origSetMovement(state);
-                    if (hasActiveMovement(state) && handle.body?.isSleeping())
+                    if (hasActiveMovement(state) && isLiveRapierBody(world, handle.body) && handle.body.isSleeping())
                         handle.body.wakeUp();
                 };
             }

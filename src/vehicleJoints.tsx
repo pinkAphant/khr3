@@ -9,6 +9,7 @@ import { captureSubtreeOrigins } from "./clone.js";
 import {
     bodyPoseMatrix,
     computeLumpedMassProps,
+    isLiveRapierBody,
     type LumpedMassProps,
     type QuatTuple,
     type Vec3Tuple,
@@ -206,7 +207,7 @@ export function KhrVehicleJoints({
         if (!enableCustomGravity || parts.length === 0 || world.timestep <= 0)
             return;
         for (const rb of bodyMapRef.current.values()) {
-            if (rb.isDynamic())
+            if (isLiveRapierBody(world, rb) && rb.isDynamic())
                 applyGravityField(rb, world.timestep);
         }
     });

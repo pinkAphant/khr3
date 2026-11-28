@@ -810,10 +810,41 @@ export function computeLumpedMassProps(bodies: readonly KhrBodySpec[], invFrame?
 }
 
 /**
+ * Verifies that `rb` is still live in `world` (`world.getRigidBody(rb.handle) === rb`),
+ * preventing React 19 `<StrictMode>` pass-1 freed WASM handle panics (`RuntimeError: unreachable`).
+ */
+export function isLiveRapierBody(
+    world: { getRigidBody(handle: number): unknown },
+    rb: { readonly handle: number } | null | undefined,
+): boolean {
+    if (!rb)
+        return false;
+    return world.getRigidBody(rb.handle) === rb;
+}
+
+/**
+ * Verifies that `col` is still live in `world` (`world.getCollider(col.handle) === col`).
+ */
+export function isLiveRapierCollider(
+    world: { getCollider(handle: number): unknown },
+    col: { readonly handle: number } | null | undefined,
+): boolean {
+    if (!col)
+        return false;
+    return world.getCollider(col.handle) === col;
+}
+
+/**
  * Applies exact `LumpedMassProps` directly in `RigidBody` local space (`density = 0` on colliders).
  */
-export function applyRapierBodyMass(rb: RapierRigidBody, lumped: LumpedMassProps | null): void {
+export function applyRapierBodyMass(
+    rb: RapierRigidBody,
+    lumped: LumpedMassProps | null,
+    world?: { getRigidBody(handle: number): unknown },
+): void {
     if (!lumped || !(lumped.mass > 0))
+        return;
+    if (world && !isLiveRapierBody(world, rb))
         return;
     const n = rb.numColliders();
     for (let i = 0; i < n; i++)

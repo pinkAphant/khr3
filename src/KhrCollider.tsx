@@ -7,8 +7,10 @@ import {
     CuboidCollider,
     CylinderCollider,
     TrimeshCollider,
+    useRapier,
     type RapierCollider,
 } from "@react-three/rapier";
+import { isLiveRapierBody, isLiveRapierCollider } from "./inertia.js";
 import { assignRef, type KhrColliderSpec, type KhrCombineMode } from "./types.js";
 
 export interface ColliderMass {
@@ -51,6 +53,7 @@ export function KhrCollider({
     solverGroups,
     ref,
 }: KhrColliderProps): React.JSX.Element {
+    const { world } = useRapier();
     const innerRef = useRef<RapierCollider | null>(null);
     const setRef = useCallback(
         (node: RapierCollider | null) => {
@@ -61,8 +64,13 @@ export function KhrCollider({
     );
 
     useEffect(() => {
-        innerRef.current?.parent()?.recomputeMassPropertiesFromColliders();
-    }, [c, density, mass, massProperties]);
+        const col = innerRef.current;
+        if (!col || !isLiveRapierCollider(world, col))
+            return;
+        const parent = col.parent();
+        if (parent && isLiveRapierBody(world, parent))
+            parent.recomputeMassPropertiesFromColliders();
+    }, [world, c, density, mass, massProperties]);
 
     const effCollisionGroups = c.collisionGroups ?? collisionGroups;
     const effSolverGroups = solverGroups ?? effCollisionGroups;
