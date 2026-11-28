@@ -9,8 +9,8 @@ import {
     assertSceneIdentityWorldScale,
     assertUnitScale,
     bodyPoseMatrix,
-    buildBodyMassTarget,
-    type RapierBodyMassTarget,
+    computeLumpedMassProps,
+    type LumpedMassProps,
 } from "./inertia.js";
 import { buildJointRuntime, createRapierImpulseJoint, toggleDrivenJoint } from "./joints.js";
 import { KhrCollider } from "./KhrCollider.js";
@@ -31,7 +31,6 @@ export interface PlannedCollider {
     spec: KhrColliderSpec;
     position: Vec3;
     quaternion: Quat;
-    density?: number;
 }
 
 export interface PartPlan {
@@ -44,7 +43,7 @@ export interface PartPlan {
     restRelRootQuat: Quat;
     axisParent: Vec3;
     axisChild: Vec3;
-    massTarget: RapierBodyMassTarget | null;
+    lumpedMass: LumpedMassProps | null;
     colliders: PlannedCollider[];
 }
 
@@ -55,7 +54,7 @@ export interface RootPlan {
     mountNode: THREE.Object3D;
     mountPosition: Vec3;
     mountQuaternion: Quat;
-    massTarget: RapierBodyMassTarget | null;
+    lumpedMass: LumpedMassProps | null;
     colliders: PlannedCollider[];
     parts: PartPlan[];
 }
@@ -89,11 +88,10 @@ function lowestCommonAncestor(nodes: readonly THREE.Object3D[], sceneRoot: THREE
     return sceneRoot;
 }
 
-function planOwnColliders(body: KhrBodySpec, massTarget: RapierBodyMassTarget | null, frameQuat?: THREE.Quaternion): PlannedCollider[] {
+function planOwnColliders(body: KhrBodySpec, frameQuat?: THREE.Quaternion): PlannedCollider[] {
     const one = new THREE.Vector3(1, 1, 1);
     const frameMat = frameQuat ? new THREE.Matrix4().makeRotationFromQuaternion(frameQuat) : null;
     const pos = new THREE.Vector3(), quat = new THREE.Quaternion(), scl = new THREE.Vector3();
-    const density = massTarget && !massTarget.hasExplicitInertia ? 1 : 0;
     return body.colliders.map((spec) => {
         const colQuat = new THREE.Quaternion().fromArray(spec.localQuaternion);
         const local = new THREE.Matrix4().compose(new THREE.Vector3().fromArray(spec.localPosition), colQuat, one);
@@ -105,7 +103,6 @@ function planOwnColliders(body: KhrBodySpec, massTarget: RapierBodyMassTarget | 
             spec,
             position: [pos.x, pos.y, pos.z],
             quaternion: [quat.x, quat.y, quat.z, quat.w],
-            density,
         };
     });
 }
@@ -173,8 +170,11 @@ export function planAssembly(bundle: KhrAssetBundle): RootPlan[] {
                     : [rpPos.x, rpPos.y, rpPos.z];
 
                 const rrQuatTuple: Quat = [rrQuat.x, rrQuat.y, rrQuat.z, rrQuat.w];
-                const massTarget = buildBodyMassTarget(b, rrQuatTuple);
-                const colliders = planOwnColliders(b, massTarget, rrQuat);
+                const invPartFrame = new THREE.Matrix4()
+                    .compose(new THREE.Vector3().fromArray(b.localPosition), new THREE.Quaternion().fromArray(root.localQuaternion), new THREE.Vector3(1, 1, 1))
+                    .invert();
+                const lumpedMass = computeLumpedMassProps([b], invPartFrame);
+                const colliders = planOwnColliders(b, rrQuat);
 
                 const plan: PartPlan = {
                     spec: b,
@@ -186,15 +186,15 @@ export function planAssembly(bundle: KhrAssetBundle): RootPlan[] {
                     restRelRootQuat: rrQuatTuple,
                     axisParent: [axParentVec.x, axParentVec.y, axParentVec.z],
                     axisChild: [axChildVec.x, axChildVec.y, axChildVec.z],
-                    massTarget,
+                    lumpedMass,
                     colliders,
                 };
                 partByName.set(b.nodeName, plan);
                 return plan;
             });
 
-            const massTarget = buildBodyMassTarget(root);
-            const colliders = planOwnColliders(root, massTarget);
+            const lumpedMass = computeLumpedMassProps([root], invRoot);
+            const colliders = planOwnColliders(root);
             const mountNode = lowestCommonAncestor([root.object, ...descendants.map((d) => d.object)], bundle.scene);
             const mountInRoot = invRoot.clone().multiply(matrixToRoot(mountNode, bundle.scene));
 
@@ -212,7 +212,7 @@ export function planAssembly(bundle: KhrAssetBundle): RootPlan[] {
                 mountNode,
                 mountPosition: [mountPos.x, mountPos.y, mountPos.z],
                 mountQuaternion: [mountQuat.x, mountQuat.y, mountQuat.z, mountQuat.w],
-                massTarget,
+                lumpedMass,
                 colliders,
                 parts,
             };
@@ -278,9 +278,9 @@ function ArticulatedPartBody({
     useEffect(() => () => onBody(part.spec.nodeName, null), [part.spec.nodeName, onBody]);
 
     useEffect(() => {
-        if (childBody && part.massTarget)
-            applyRapierBodyMass(childBody, part.massTarget);
-    }, [childBody, part.massTarget]);
+        if (childBody && part.lumpedMass)
+            applyRapierBodyMass(childBody, part.lumpedMass);
+    }, [childBody, part.lumpedMass]);
 
     useEffect(() => {
         if (!parentBody || !childBody)
@@ -360,7 +360,6 @@ function ArticulatedPartBody({
                     c={col.spec}
                     position={col.position}
                     quaternion={col.quaternion}
-                    density={col.density}
                 />
             ))}
         </RigidBody>
@@ -405,9 +404,9 @@ function AssemblyRootBody({
     useEffect(() => () => onBody(rootSpec.nodeName, null), [rootSpec.nodeName, onBody]);
 
     useEffect(() => {
-        if (rootBody && plan.massTarget)
-            applyRapierBodyMass(rootBody, plan.massTarget);
-    }, [rootBody, plan.massTarget]);
+        if (rootBody && plan.lumpedMass)
+            applyRapierBodyMass(rootBody, plan.lumpedMass);
+    }, [rootBody, plan.lumpedMass]);
 
     const handlePartBody = useCallback((nodeName: string, rb: RapierRigidBody | null) => {
         setPartBodies((prev) => {
@@ -440,7 +439,7 @@ function AssemblyRootBody({
             >
                 {children}
                 {plan.colliders.map((col, idx) => (
-                    <KhrCollider key={`r${idx}`} c={col.spec} position={col.position} quaternion={col.quaternion} density={col.density} />
+                    <KhrCollider key={`r${idx}`} c={col.spec} position={col.position} quaternion={col.quaternion} />
                 ))}
             </RigidBody>
             {plan.parts.map((part) => (
@@ -504,9 +503,42 @@ export function KhrAssembly({
     const { world } = useRapier();
     const applyGravityField = useCustomGravity((s) => s.applyGravityField);
     const plans = useMemo(() => planAssembly(bundle), [bundle]);
+    const isStaticMultiRootCompound = useMemo(
+        () => fixedRoot && plans.length > 1 && plans.every((p) => p.spec.isKinematic && p.parts.length === 0),
+        [fixedRoot, plans],
+    );
+
+    const compoundColliders = useMemo(() => {
+        if (!isStaticMultiRootCompound)
+            return null;
+        const one = new THREE.Vector3(1, 1, 1);
+        const pos = new THREE.Vector3(), quat = new THREE.Quaternion(), scl = new THREE.Vector3();
+        const out: Array<{ key: string; spec: KhrColliderSpec; position: Vec3; quaternion: Quat }> = [];
+        for (const p of plans) {
+            const bMat = bodyPoseMatrix(p.spec);
+            for (let idx = 0; idx < p.spec.colliders.length; idx++) {
+                const c = p.spec.colliders[idx];
+                const cMat = new THREE.Matrix4().compose(
+                    new THREE.Vector3().fromArray(c.localPosition),
+                    new THREE.Quaternion().fromArray(c.localQuaternion),
+                    one,
+                );
+                bMat.clone().multiply(cMat).decompose(pos, quat, scl);
+                quat.normalize();
+                out.push({
+                    key: `${p.spec.nodeName}:${idx}`,
+                    spec: c,
+                    position: [pos.x, pos.y, pos.z],
+                    quaternion: [quat.x, quat.y, quat.z, quat.w],
+                });
+            }
+        }
+        return out;
+    }, [isStaticMultiRootCompound, plans]);
+
     const origins = useMemo(
-        () => (plans.length > 1 ? captureSubtreeOrigins(plans.map((p) => p.mountNode), bundle.scene) : null),
-        [plans, bundle.scene],
+        () => (!isStaticMultiRootCompound && plans.length > 1 ? captureSubtreeOrigins(plans.map((p) => p.mountNode), bundle.scene) : null),
+        [isStaticMultiRootCompound, plans, bundle.scene],
     );
 
     const [px, py, pz] = position;
@@ -589,6 +621,45 @@ export function KhrAssembly({
             return false;
         },
     }), []);
+
+    const assignCompoundRef = useCallback((rb: RapierRigidBody | null) => {
+        for (const p of plans) {
+            if (rb)
+                bodiesRef.current.set(p.spec.nodeName, rb);
+            else
+                bodiesRef.current.delete(p.spec.nodeName);
+        }
+    }, [plans]);
+
+    useEffect(() => {
+        if (!isStaticMultiRootCompound)
+            return;
+        return () => {
+            for (const p of plans)
+                bodiesRef.current.delete(p.spec.nodeName);
+        };
+    }, [isStaticMultiRootCompound, plans]);
+
+    if (isStaticMultiRootCompound && compoundColliders) {
+        return (
+            <group {...groupProps}>
+                <RigidBody
+                    {...rigidBodyProps}
+                    ref={assignCompoundRef}
+                    type="fixed"
+                    position={position}
+                    quaternion={[spawnQuat.x, spawnQuat.y, spawnQuat.z, spawnQuat.w]}
+                    colliders={false}
+                >
+                    <BundleSceneHost bundle={bundle} owner="KhrAssembly" />
+                    {children}
+                    {compoundColliders.map((col) => (
+                        <KhrCollider key={col.key} c={col.spec} position={col.position} quaternion={col.quaternion} />
+                    ))}
+                </RigidBody>
+            </group>
+        );
+    }
 
     if (plans.length === 1) {
         const plan = plans[0];

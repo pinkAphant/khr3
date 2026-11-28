@@ -188,12 +188,24 @@ export interface KhrBreakawaySpec {
     breakImpulseNs: number;
 }
 
+export interface KhrEmitterSpec {
+    nodeName: string;
+    kind: string;
+    drive?: string;
+    color?: [number, number, number];
+    size?: number;
+    position: [number, number, number];
+    quaternion: [number, number, number, number];
+    object: THREE.Object3D;
+}
+
 export interface KhrBodySpec {
     nodeName: string;
     isKinematic: boolean;
     hasExplicitMotion?: boolean;
     hasExplicitCom?: boolean;
     hasExplicitInertia?: boolean;
+    hasExplicitInertiaOrientation?: boolean;
     mass: number;
     centerOfMass: [number, number, number];
     inertiaDiagonal: [number, number, number];
@@ -215,6 +227,7 @@ export interface KhrAssetBundle {
     bodies: KhrBodySpec[];
     wheels: EcctrlWheelTag[];
     propellers: EcctrlPropellerTag[];
+    emitters: KhrEmitterSpec[];
     sockets: Record<string, [number, number, number]>;
     totalDynamicMass: number;
     centerOfMass: [number, number, number];

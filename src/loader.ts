@@ -10,6 +10,7 @@ import {
     decodePropellerTag,
     decodeShape,
     decodeWheelTag,
+    extractDefaultBodyRole,
     type KhrNodeMeta,
     type KhrTemplateMeta,
 } from "./decoders.js";
@@ -20,6 +21,7 @@ import {
     computeRelativePose,
     extractMeshColliderShape,
     readFiniteVec3,
+    resolveBodyMassFromColliders,
 } from "./inertia.js";
 import {
     type EcctrlPropellerTag,
@@ -30,6 +32,7 @@ import {
     type KhrCarConfig,
     type KhrColliderShape,
     type KhrDroneConfig,
+    type KhrEmitterSpec,
     type KhrImplicitShape,
     type KhrPluginOptions,
     KhrValidationError,
@@ -106,8 +109,7 @@ export function applyKhrCustomExtractors(
             const dstBody = clonedBundle.bodies[i];
             if (!rawBody || !dstBody)
                 continue;
-            const role = extractRole(rawBody.nodeName, rawBody.extras)
-                ?? (typeof rawBody.extras.role === "string" ? rawBody.extras.role : null);
+            const role = extractRole(rawBody.nodeName, rawBody.extras) ?? extractDefaultBodyRole(rawBody.extras);
             dstBody.role = role;
             if (dstBody.joint)
                 dstBody.joint.role = role;
@@ -115,6 +117,8 @@ export function applyKhrCustomExtractors(
     }
     if (isSocketNode) {
         const sockets: Record<string, [number, number, number]> = Object.create(null);
+        for (const [k, v] of Object.entries(templateBundle.sockets))
+            sockets[k] = [...v];
         for (const node of meta.nodes) {
             const custom = isSocketNode(node.nodeName, node.extras);
             if (custom || node.extras.isIkAnchor === true || typeof node.extras.socketId === "string") {
@@ -357,6 +361,7 @@ export function extractKhrBundleFromGltf(gltf: GLTF, options?: KhrPluginOptions)
     const { parentIdx, nodeNames, resolveObj } = buildNodeGraphLookup(gltf, rawNodes, json);
     const nodeMetas: KhrNodeMeta[] = [];
     const sockets: Record<string, [number, number, number]> = Object.create(null);
+    const emitters: KhrEmitterSpec[] = [];
 
     for (let i = 0; i < rawNodes.length; i++) {
         const obj = resolveObj(i);
@@ -366,7 +371,7 @@ export function extractKhrBundleFromGltf(gltf: GLTF, options?: KhrPluginOptions)
         if (rawExt !== undefined && !isObj(rawExt))
             throw new KhrValidationError(`Node "${nodeNames[i]}" has invalid extensions`);
         const extras = isObj(rawNodes[i].extras) ? rawNodes[i].extras! : {};
-        nodeMetas.push(collectNodeSockets(obj, nodeNames[i], extras, sockets, options?.isSocketNode));
+        nodeMetas.push(collectNodeSockets(obj, nodeNames[i], extras, sockets, emitters, gltf.scene, rawExt, options?.isSocketNode));
     }
 
     const bodies: KhrBodySpec[] = [];
@@ -429,7 +434,7 @@ export function extractKhrBundleFromGltf(gltf: GLTF, options?: KhrPluginOptions)
             phys.motion !== undefined,
             name,
         );
-        const role = options?.extractRole?.(name, extras) ?? (typeof extras.role === "string" ? extras.role : null);
+        const role = options?.extractRole?.(name, extras) ?? extractDefaultBodyRole(extras);
         let joint: KhrBodySpec["joint"] = null;
         if (phys.joint !== undefined) {
             if (!isObj(phys.joint))
@@ -507,8 +512,17 @@ export function extractKhrBundleFromGltf(gltf: GLTF, options?: KhrPluginOptions)
     }
 
     for (const body of bodies) {
-        if (!body.isKinematic && !body.hasExplicitInertia && body.colliders.length === 0) {
-            throw new KhrValidationError(`Dynamic node "${body.nodeName}" is missing motion.inertiaDiagonal and has no colliders`);
+        if (!body.isKinematic && !body.hasExplicitInertia) {
+            const solved = resolveBodyMassFromColliders(
+                body.colliders,
+                body.mass,
+                body.hasExplicitCom ? body.centerOfMass : null,
+                body.hasExplicitInertiaOrientation ? body.inertiaOrientation : null,
+                body.nodeName,
+            );
+            body.centerOfMass = solved.centerOfMass;
+            body.inertiaDiagonal = solved.inertiaDiagonal;
+            body.inertiaOrientation = solved.inertiaOrientation;
         }
     }
 
@@ -535,6 +549,7 @@ export function extractKhrBundleFromGltf(gltf: GLTF, options?: KhrPluginOptions)
         bodies,
         wheels,
         propellers,
+        emitters,
         sockets,
         totalDynamicMass,
         centerOfMass,

@@ -28,9 +28,9 @@ import {
     assertSceneIdentityWorldScale,
     assertUnitScale,
     bodyPoseMatrix,
-    buildBodyMassTarget,
+    computeLumpedMassProps,
+    type LumpedMassProps,
     type QuatTuple,
-    type RapierBodyMassTarget,
     type Vec3Tuple,
 } from "./inertia.js";
 import { KhrCollider } from "./KhrCollider.js";
@@ -125,9 +125,7 @@ function readSpawnQuat(
 }
 
 interface ChassisMassSummary {
-    mass: number;
-    com: Vec3Tuple;
-    massTarget: RapierBodyMassTarget;
+    lumpedMass: LumpedMassProps;
     linearVelocity?: Vec3Tuple;
     angularVelocity?: Vec3Tuple;
     gravityFactor?: number;
@@ -138,38 +136,9 @@ function computeChassisMassProps(bodies: readonly KhrBodySpec[]): ChassisMassSum
     if (dyn.length === 0)
         throw new KhrValidationError("KhrVehicle: bundle has no dynamic rigid body for the chassis");
 
-    let mass = 0, mx = 0, my = 0, mz = 0;
-    let anyExplicitCom = false;
-    const rPos = new THREE.Vector3(), rQuat = new THREE.Quaternion();
-    for (const b of dyn) {
-        if (!(b.mass > 0))
-            continue;
-        mass += b.mass;
-        rPos.fromArray(b.centerOfMass).applyQuaternion(rQuat.fromArray(b.localQuaternion));
-        const cx = b.localPosition[0] + rPos.x;
-        const cy = b.localPosition[1] + rPos.y;
-        const cz = b.localPosition[2] + rPos.z;
-        mx += cx * b.mass;
-        my += cy * b.mass;
-        mz += cz * b.mass;
-        if (b.hasExplicitCom || Math.abs(cx) > 1e-9 || Math.abs(cy) > 1e-9 || Math.abs(cz) > 1e-9)
-            anyExplicitCom = true;
-    }
-    if (!(mass > 0))
+    const lumpedMass = computeLumpedMassProps(dyn);
+    if (!lumpedMass)
         throw new KhrValidationError("KhrVehicle: chassis dynamic mass must be positive");
-    const com: Vec3Tuple = [mx / mass, my / mass, mz / mass];
-
-    const singleTarget = dyn.length === 1
-        ? buildBodyMassTarget(dyn[0], dyn[0].localQuaternion, dyn[0].localPosition)
-        : null;
-    const massTarget: RapierBodyMassTarget = singleTarget ?? {
-        mass,
-        com,
-        hasExplicitCom: anyExplicitCom,
-        inertiaDiagonal: [0, 0, 0],
-        inertiaFrame: [0, 0, 0, 1],
-        hasExplicitInertia: false,
-    };
 
     let gravityFactor: number | undefined;
     if (dyn.some((b) => b.gravityFactor !== undefined)) {
@@ -193,7 +162,7 @@ function computeChassisMassProps(bodies: readonly KhrBodySpec[]): ChassisMassSum
             vy += lv[1] * b.mass;
             vz += lv[2] * b.mass;
         }
-        linearVelocity = [vx / mass, vy / mass, vz / mass];
+        linearVelocity = [vx / lumpedMass.mass, vy / lumpedMass.mass, vz / lumpedMass.mass];
     }
 
     const rootDyn = dyn.find((b) => b.angularVelocity !== undefined);
@@ -202,25 +171,19 @@ function computeChassisMassProps(bodies: readonly KhrBodySpec[]): ChassisMassSum
         : undefined;
 
     return {
-        mass,
-        com,
-        massTarget,
+        lumpedMass,
         ...(linearVelocity ? { linearVelocity } : {}),
         ...(angularVelocity ? { angularVelocity } : {}),
         ...(gravityFactor !== undefined ? { gravityFactor } : {}),
     };
 }
 
-function buildChassisColliders(
-    bodies: readonly KhrBodySpec[],
-    massTarget: RapierBodyMassTarget,
-): Array<{ key: string; spec: KhrColliderSpec; density: number }> {
-    const out: Array<{ key: string; spec: KhrColliderSpec; density: number }> = [];
+function buildChassisColliders(bodies: readonly KhrBodySpec[]): Array<{ key: string; spec: KhrColliderSpec }> {
+    const out: Array<{ key: string; spec: KhrColliderSpec }> = [];
     const one = new THREE.Vector3(1, 1, 1);
     const pos = new THREE.Vector3();
     const quat = new THREE.Quaternion();
     const scl = new THREE.Vector3();
-    const density = massTarget.hasExplicitInertia ? 0 : 1;
 
     for (const b of bodies) {
         if (b.joint !== null || (b.isKinematic && b.hasExplicitMotion))
@@ -242,7 +205,6 @@ function buildChassisColliders(
                     localPosition: [pos.x, pos.y, pos.z],
                     localQuaternion: [quat.x, quat.y, quat.z, quat.w],
                 },
-                density,
             });
         }
     }
@@ -442,30 +404,16 @@ export function KhrVehicle({ scale, colliders, bundle, ...rest }: KhrVehicleProp
     const [chassisBody, setChassisBody] = useState<RAPIER.RigidBody | null>(null);
 
     const chassis = useMemo(() => computeChassisMassProps(bundle.bodies), [bundle]);
-    const collidersList = useMemo(() => buildChassisColliders(bundle.bodies, chassis.massTarget), [bundle.bodies, chassis.massTarget]);
-    const [rapierCom, setRapierCom] = useState<Vec3Tuple | null>(null);
-    const effCom = rapierCom ?? bundle.centerOfMass;
+    const collidersList = useMemo(() => buildChassisColliders(bundle.bodies), [bundle.bodies]);
 
     useEffect(() => {
-        if (!chassisBody)
-            return;
-        applyRapierBodyMass(chassisBody, chassis.massTarget);
-        if (!chassis.massTarget.hasExplicitCom) {
-            const lc = chassisBody.localCom();
-            setRapierCom((prev) =>
-                prev && Math.hypot(prev[0] - lc.x, prev[1] - lc.y, prev[2] - lc.z) < 1e-4
-                    ? prev
-                    : [lc.x, lc.y, lc.z],
-            );
-        }
-        else {
-            setRapierCom(null);
-        }
-    }, [chassisBody, chassis.massTarget]);
+        if (chassisBody)
+            applyRapierBodyMass(chassisBody, chassis.lumpedMass);
+    }, [chassisBody, chassis.lumpedMass]);
 
     const solvedWheels = useMemo(
-        () => solveWheelLoads(bundle.wheels, bundle.totalDynamicMass, effCom, 0.7, refGrav),
-        [bundle.wheels, bundle.totalDynamicMass, effCom, refGrav],
+        () => solveWheelLoads(bundle.wheels, bundle.totalDynamicMass, bundle.centerOfMass, 0.7, refGrav),
+        [bundle.wheels, bundle.totalDynamicMass, bundle.centerOfMass, refGrav],
     );
     const rotorOrigins = useMemo(
         () => captureSubtreeOrigins([...bundle.wheels.map((w) => w.object), ...bundle.propellers.map((p) => p.object)], bundle.scene),
@@ -477,12 +425,12 @@ export function KhrVehicle({ scale, colliders, bundle, ...rest }: KhrVehicleProp
         if (steered.length === 0)
             return 1;
         const meanSteerZ = steered.reduce((s, w) => s + w.mountPos[2], 0) / steered.length;
-        return meanSteerZ < effCom[2] - 1e-3 ? -1 : 1;
-    }, [solvedWheels, effCom]);
+        return meanSteerZ < bundle.centerOfMass[2] - 1e-3 ? -1 : 1;
+    }, [solvedWheels, bundle.centerOfMass]);
 
     const frontWheelNames = useMemo(
-        () => new Set(solvedWheels.filter((w) => (w.mountPos[2] - effCom[2]) * forwardSign >= 0).map((w) => w.tag.nodeName)),
-        [solvedWheels, effCom, forwardSign],
+        () => new Set(solvedWheels.filter((w) => (w.mountPos[2] - bundle.centerOfMass[2]) * forwardSign >= 0).map((w) => w.tag.nodeName)),
+        [solvedWheels, bundle.centerOfMass, forwardSign],
     );
     const wheelsAllOff = !enable || isZeroG || (wheelConfig?.enable === false && frontWheelConfig?.enable !== true && rearWheelConfig?.enable !== true);
     const frontOff = frontWheelConfig?.enable === false || (frontWheelConfig?.enable === undefined && wheelConfig?.enable === false);
@@ -597,8 +545,8 @@ export function KhrVehicle({ scale, colliders, bundle, ...rest }: KhrVehicleProp
             >
                 <BundleSceneHost bundle={bundle} owner="KhrVehicle" />
                 {children}
-                {collidersList.map(({ key, spec, density }) => (
-                    <KhrCollider key={key} c={spec} density={density} />
+                {collidersList.map(({ key, spec }) => (
+                    <KhrCollider key={key} c={spec} />
                 ))}
                 {solvedWheels.map(({ tag, cornerMassKg, springK, dampingC, mountPos }) => {
                     const axleCfg = frontWheelNames.has(tag.nodeName) ? frontWheelConfig : rearWheelConfig;

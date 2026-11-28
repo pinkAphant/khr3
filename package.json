@@ -1,6 +1,6 @@
 {
   "name": "@khr3/core",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "description": "KHR_physics_rigid_bodies + KHR_implicit_shapes loader, exporter, Rapier assembly and ecctrl vehicle rig for React Three Fiber",
   "license": "MIT",
   "type": "module",
@@ -20,6 +20,7 @@
   },
   "files": [
     "dist",
+    "docs",
     "LICENSE",
     "README.md"
   ],
@@ -34,8 +35,8 @@
     "pack:dry": "npm pack --dry-run"
   },
   "peerDependencies": {
-    "@dimforge/rapier3d-compat": "0.19.2",
-    "@pinkaphant/ecctrl": "2.0.4-beta.5",
+    "@dimforge/rapier3d-compat": "^0.19.2",
+    "@pinkaphant/ecctrl": ">=2.0.4-beta.5",
     "@react-three/fiber": "^9.0.0",
     "@react-three/rapier": "^2.2.0",
     "react": "^19.0.0",

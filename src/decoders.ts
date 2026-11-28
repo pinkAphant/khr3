@@ -16,6 +16,7 @@ import {
     type KhrBreakawaySpec,
     type KhrCombineMode,
     type KhrCurveData,
+    type KhrEmitterSpec,
     type KhrImplicitShape,
     type KhrJointDriveSpec,
     type KhrJointSpec,
@@ -28,6 +29,8 @@ export interface KhrNodeMeta {
     nodeName: string;
     extras: Record<string, unknown>;
     worldPosition: [number, number, number];
+    emitterSocket?: string;
+    inferredSocket?: string;
     contactDots?: Array<[string, [number, number, number]]>;
 }
 
@@ -196,7 +199,8 @@ export function decodeMotion(
     const centerOfMass = !hasExplicitCom
         ? ([0, 0, 0] as [number, number, number])
         : readFiniteVec3(motion.centerOfMass, `${name}.motion.centerOfMass`);
-    const inertiaOrientation = motion.inertiaOrientation === undefined
+    const hasExplicitInertiaOrientation = motion.inertiaOrientation !== undefined;
+    const inertiaOrientation = !hasExplicitInertiaOrientation
         ? ([0, 0, 0, 1] as [number, number, number, number])
         : readUnitQuat(motion.inertiaOrientation, `${name}.motion.inertiaOrientation`);
     let inertiaDiagonal: [number, number, number] = [0, 0, 0];
@@ -215,6 +219,7 @@ export function decodeMotion(
         hasExplicitMotion: hasMotion,
         hasExplicitCom,
         hasExplicitInertia,
+        hasExplicitInertiaOrientation,
         mass,
         centerOfMass,
         inertiaDiagonal,
@@ -633,11 +638,45 @@ export function decodeBreakawaySpec(raw: unknown): KhrBreakawaySpec | undefined 
     return { ...(latch === undefined ? {} : { latchImpulseNs: latch }), breakImpulseNs: raw.breakImpulseNs };
 }
 
+const SOCKET_PREFIX_RE = /^(?:socket|ik)_(.+)$/i;
+const SEAT_NODE_RE = /^seat(?:_[lr])?$/i;
+const _seatBox = new THREE.Box3();
+const _seatCenter = new THREE.Vector3();
+
+function resolveNodePivotOrMeshCenter(obj: THREE.Object3D): [number, number, number] {
+    obj.getWorldPosition(_wpA);
+    if (_wpA.lengthSq() > 1e-8)
+        return [_wpA.x, _wpA.y, _wpA.z];
+    _seatBox.makeEmpty();
+    obj.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        if (mesh.isMesh && mesh.geometry)
+            _seatBox.expandByObject(mesh);
+    });
+    if (!_seatBox.isEmpty()) {
+        _seatBox.getCenter(_seatCenter);
+        return [_seatCenter.x, _seatCenter.y, _seatCenter.z];
+    }
+    return [_wpA.x, _wpA.y, _wpA.z];
+}
+
+export function extractDefaultBodyRole(extras: Record<string, unknown>): string | null {
+    for (const key of ["role", "vehicleRole", "buildingRole", "weaponRole"] as const) {
+        const val = extras[key];
+        if (typeof val === "string" && val.length > 0)
+            return val;
+    }
+    return null;
+}
+
 export function collectNodeSockets(
     obj: THREE.Object3D,
     name: string,
     extras: Record<string, unknown>,
     sockets: Record<string, [number, number, number]>,
+    emitters: KhrEmitterSpec[],
+    scene?: THREE.Object3D,
+    rawExtensions?: Record<string, unknown>,
     isSocketNode?: KhrPluginOptions["isSocketNode"],
 ): KhrNodeMeta {
     if (extras.socketId !== undefined && (typeof extras.socketId !== "string" || extras.socketId.length === 0)) {
@@ -645,6 +684,46 @@ export function collectNodeSockets(
     }
     obj.getWorldPosition(_wpA);
     const worldPosition: [number, number, number] = [_wpA.x, _wpA.y, _wpA.z];
+
+    let emitterSocket: string | undefined;
+    const rawEmitter = rawExtensions?.KOLMO_emitter;
+    if (rawEmitter !== undefined) {
+        if (!isObj(rawEmitter))
+            throw new KhrValidationError(`Node "${name}" has invalid extensions.KOLMO_emitter`);
+        if (rawEmitter.socket !== undefined) {
+            if (typeof rawEmitter.socket !== "string" || rawEmitter.socket.length === 0) {
+                throw new KhrValidationError(`Node "${name}" has invalid KOLMO_emitter.socket`);
+            }
+            emitterSocket = rawEmitter.socket;
+            sockets[emitterSocket] = [...worldPosition];
+            sockets[name] = [...worldPosition];
+        }
+        if (rawEmitter.kind !== undefined) {
+            if (typeof rawEmitter.kind !== "string" || rawEmitter.kind.length === 0) {
+                throw new KhrValidationError(`Node "${name}" has invalid KOLMO_emitter.kind`);
+            }
+            if (rawEmitter.drive !== undefined && (typeof rawEmitter.drive !== "string" || rawEmitter.drive.length === 0)) {
+                throw new KhrValidationError(`Node "${name}" has invalid KOLMO_emitter.drive`);
+            }
+            let color: [number, number, number] | undefined;
+            if (rawEmitter.color !== undefined) {
+                color = readFiniteVec3(rawEmitter.color, `${name}.KOLMO_emitter.color`);
+            }
+            const size = optFiniteNum(rawEmitter.size, `${name}.KOLMO_emitter.size`, true);
+            emitters.push({
+                nodeName: name,
+                kind: rawEmitter.kind,
+                ...(typeof rawEmitter.drive === "string" ? { drive: rawEmitter.drive } : {}),
+                ...(color ? { color } : {}),
+                ...(size === undefined ? {} : { size }),
+                position: [...worldPosition],
+                quaternion: getRelativeQuatArray(obj, scene),
+                object: obj,
+            });
+        }
+    }
+
+    let inferredSocket: string | undefined;
     const custom = isSocketNode?.(name, extras);
     if (custom || extras.isIkAnchor === true || typeof extras.socketId === "string") {
         const key = typeof custom === "string" && custom.length > 0
@@ -652,6 +731,22 @@ export function collectNodeSockets(
             : (typeof extras.socketId === "string" ? extras.socketId : name);
         sockets[key] = [...worldPosition];
     }
+    else if (!emitterSocket) {
+        const prefixMatch = SOCKET_PREFIX_RE.exec(name);
+        if (prefixMatch) {
+            inferredSocket = prefixMatch[1].toLowerCase();
+            sockets[inferredSocket] ??= [...worldPosition];
+            sockets[name] ??= [...worldPosition];
+        }
+        else if (SEAT_NODE_RE.test(name)) {
+            const seatPos = resolveNodePivotOrMeshCenter(obj);
+            sockets[name] = seatPos;
+            if (/^seat(?:_l)?$/i.test(name))
+                sockets.seat ??= [...seatPos];
+            inferredSocket = name;
+        }
+    }
+
     let contactDots: Array<[string, [number, number, number]]> | undefined;
     if (extras.contactDots !== undefined) {
         if (!Array.isArray(extras.contactDots)) {
@@ -680,6 +775,8 @@ export function collectNodeSockets(
         nodeName: name,
         extras,
         worldPosition,
+        ...(emitterSocket ? { emitterSocket } : {}),
+        ...(inferredSocket ? { inferredSocket } : {}),
         ...(contactDots ? { contactDots } : {}),
     };
 }

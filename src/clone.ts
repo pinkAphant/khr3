@@ -175,6 +175,13 @@ export function cloneKhrBundle(bundle: KhrAssetBundle): KhrAssetBundle {
                 position: [...p.position],
                 ...(p.quaternion ? { quaternion: [...p.quaternion] } : {}),
             })),
+            emitters: bundle.emitters.map((e) => ({
+                ...e,
+                ...(e.color ? { color: [...e.color] } : {}),
+                position: [...e.position],
+                quaternion: [...e.quaternion],
+                object: remapNode(bundle.scene, e.object, scene),
+            })),
             sockets,
             totalDynamicMass: bundle.totalDynamicMass,
             centerOfMass: [...bundle.centerOfMass],

@@ -9,9 +9,9 @@ import { MountSubtreeSlot, captureSubtreeOrigins, type SubtreeOrigin } from "./c
 import {
     applyRapierBodyMass,
     bodyPoseMatrix,
-    buildBodyMassTarget,
+    computeLumpedMassProps,
+    type LumpedMassProps,
     type QuatTuple,
-    type RapierBodyMassTarget,
     type Vec3Tuple,
 } from "./inertia.js";
 import {
@@ -57,7 +57,7 @@ export interface PlannedVehiclePart {
     restRelChassisQuat: QuatTuple;
     axisParent: Vec3Tuple;
     axisChild: Vec3Tuple;
-    massTarget: RapierBodyMassTarget | null;
+    lumpedMass: LumpedMassProps | null;
     colliders: PlannedCollider[];
 }
 
@@ -122,8 +122,10 @@ export function planVehicleJointParts(bodies: readonly KhrBodySpec[]): PlannedVe
             ? [rcPos.x - parent.restRelChassisPos[0], rcPos.y - parent.restRelChassisPos[1], rcPos.z - parent.restRelChassisPos[2]]
             : [rpPos.x, rpPos.y, rpPos.z];
         const rcQuatTuple: QuatTuple = [rcQuat.x, rcQuat.y, rcQuat.z, rcQuat.w];
-        const massTarget = buildBodyMassTarget(b, rcQuatTuple);
-        const density = massTarget && !massTarget.hasExplicitInertia ? 1 : 0;
+        const invPartFrame = new THREE.Matrix4()
+            .compose(new THREE.Vector3().fromArray(b.localPosition), new THREE.Quaternion(), one)
+            .invert();
+        const lumpedMass = computeLumpedMassProps([b], invPartFrame);
         const frameMat = new THREE.Matrix4().makeRotationFromQuaternion(rcQuat);
         const cPos = new THREE.Vector3(), cQuat = new THREE.Quaternion();
         const colliders: PlannedCollider[] = b.colliders.map((spec) => {
@@ -135,7 +137,6 @@ export function planVehicleJointParts(bodies: readonly KhrBodySpec[]): PlannedVe
                 spec: spec.collisionGroups === undefined ? { ...spec, collisionGroups: ATTACHED_PANEL_INTERACTION_GROUPS } : spec,
                 position: [cPos.x, cPos.y, cPos.z],
                 quaternion: [cQuat.x, cQuat.y, cQuat.z, cQuat.w],
-                density,
             };
         });
 
@@ -149,7 +150,7 @@ export function planVehicleJointParts(bodies: readonly KhrBodySpec[]): PlannedVe
             restRelChassisQuat: rcQuatTuple,
             axisParent: [axParentVec.x, axParentVec.y, axParentVec.z],
             axisChild: [axChildVec.x, axChildVec.y, axChildVec.z],
-            massTarget,
+            lumpedMass,
             colliders,
         };
         partByName.set(b.nodeName, plan);
@@ -201,9 +202,9 @@ function VehicleArticulatedPanel({
     useEffect(() => () => onBody(part.spec.nodeName, null), [part.spec.nodeName, onBody]);
 
     useEffect(() => {
-        if (childBody && part.massTarget)
-            applyRapierBodyMass(childBody, part.massTarget);
-    }, [childBody, part.massTarget]);
+        if (childBody && part.lumpedMass)
+            applyRapierBodyMass(childBody, part.lumpedMass);
+    }, [childBody, part.lumpedMass]);
 
     useEffect(() => {
         if (!parentBody || !childBody)
@@ -278,7 +279,7 @@ function VehicleArticulatedPanel({
         >
             <MountSubtreeSlot object={part.spec.object} position={[0, 0, 0]} quaternion={part.restRelChassisQuat} origin={origin} />
             {part.colliders.map((col, cIdx) => (
-                <KhrCollider key={`vj_${part.spec.nodeName}:${cIdx}`} c={col.spec} position={col.position} quaternion={col.quaternion} density={col.density} />
+                <KhrCollider key={`vj_${part.spec.nodeName}:${cIdx}`} c={col.spec} position={col.position} quaternion={col.quaternion} />
             ))}
         </RigidBody>
     );
