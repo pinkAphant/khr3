@@ -1,5 +1,6 @@
 import type * as THREE from "three";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
+import { snapshotSceneWithMountedSubtrees } from "./clone.js";
 import { ensureHeadlessFileReader, packJsonToGlb, patchGlbJsonChunk } from "./glb.js";
 import { readFiniteVec3, readUnitQuat } from "./inertia.js";
 import {
@@ -317,12 +318,13 @@ export async function exportKhrGlb(
     sceneExtras?: Record<string, unknown>,
 ): Promise<ArrayBuffer> {
     ensureHeadlessFileReader();
-    root.updateMatrixWorld(true);
+    const exportRoot = snapshotSceneWithMountedSubtrees(root);
+    exportRoot.updateMatrixWorld(true);
     const exporter = new GLTFExporter();
-    const swaps = isolateUnloadedTextures(root);
+    const swaps = isolateUnloadedTextures(exportRoot);
     let rawBuf: ArrayBuffer;
     try {
-        const res = await exporter.parseAsync(root, { binary: true });
+        const res = await exporter.parseAsync(exportRoot, { binary: true });
         rawBuf = res instanceof ArrayBuffer ? res : packJsonToGlb(res);
     }
     finally {

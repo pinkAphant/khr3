@@ -232,9 +232,26 @@ export function openTargetForLimits(limits: readonly [number, number]): number {
     return Math.abs(limits[0]) > Math.abs(limits[1]) ? limits[0] : limits[1];
 }
 
+export function closedTargetForLimits(limits: readonly [number, number]): number {
+    return Math.min(limits[1], Math.max(limits[0], 0));
+}
+
 export function isJointOpen(rt: JointRuntime): boolean {
     if (!rt.limits)
         return false;
     const openTgt = openTargetForLimits(rt.limits);
-    return Math.abs(openTgt) > 1e-6 && Math.abs((rt.positionTarget ?? rt.getCoordinate()) - openTgt) < Math.abs(openTgt) * 0.5;
+    const closedTgt = closedTargetForLimits(rt.limits);
+    if (Math.abs(openTgt - closedTgt) <= 1e-6)
+        return false;
+    const cur = rt.positionTarget ?? rt.getCoordinate();
+    return Math.abs(cur - openTgt) < Math.abs(cur - closedTgt);
+}
+
+export function toggleDrivenJoint(rt: JointRuntime): boolean {
+    if (rt.detached || rt.drive?.stiffness === undefined)
+        return false;
+    const limits = rt.limits ?? [0, Math.PI / 2];
+    const nextTarget = isJointOpen(rt) ? closedTargetForLimits(limits) : openTargetForLimits(limits);
+    rt.applyTarget(nextTarget);
+    return true;
 }

@@ -31,18 +31,27 @@ export {
 export { createKhrGltfPlugin, loadKhrGlb } from "./loader.js";
 export { exportKhrGlb, patchGlbJsonChunk } from "./exporter.js";
 export type { MutableGltfJson, RawGltfJson } from "./glb.js";
-export { claimBundleMount, cloneKhrBundle, disposeKhrBundle, releaseBundleMount } from "./clone.js";
-export { assertIdentityWorldScale, assertSceneIdentityWorldScale, assertUnitScale, computeShapeInertia } from "./inertia.js";
-export { KhrCollider, type ColliderMass, type KhrColliderProps } from "./KhrCollider.js";
+export { claimBundleMount, cloneKhrBundle, disposeKhrBundle, releaseBundleMount, snapshotSceneWithMountedSubtrees } from "./clone.js";
+export {
+    applyRapierBodyMass,
+    assertIdentityWorldScale,
+    assertSceneIdentityWorldScale,
+    assertUnitScale,
+    buildBodyMassTarget,
+    type RapierBodyMassTarget,
+} from "./inertia.js";
+export { KHR_TRIMESH_FLAGS, KhrCollider, type ColliderMass, type KhrColliderProps } from "./KhrCollider.js";
 export { KhrAssembly, planAssembly, type KhrAssemblyHandle, type KhrAssemblyProps } from "./KhrAssembly.js";
 export { KhrGLTFLoader, createScopedGltfLoaderClass, useKhrGlb } from "./useKhrGlb.js";
 export {
     ATTACHED_PANEL_INTERACTION_GROUPS,
     DETACHED_PANEL_INTERACTION_GROUPS,
     buildJointRuntime,
+    closedTargetForLimits,
     configureJointDrive,
     createRapierImpulseJoint,
     isJointOpen,
     measureJointCoordinate,
     openTargetForLimits,
+    toggleDrivenJoint,
 } from "./joints.js";

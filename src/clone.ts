@@ -85,6 +85,27 @@ function cloneCarTune(tune?: Partial<KhrCarConfig>): Partial<KhrCarConfig> | und
 }
 
 /**
+ * Returns a structural `Object3D` clone with any mounted `RotorVisualSlot` / `MountSubtreeSlot`
+ * subtrees restored synchronously when `root` is currently mounted, or `root` itself otherwise.
+ */
+export function snapshotSceneWithMountedSubtrees(root: THREE.Object3D): THREE.Object3D {
+    const scopedSet = subtreeRestorersByScene.get(root);
+    if (!scopedSet || scopedSet.size === 0)
+        return root;
+    const restorers = [...scopedSet];
+    const reattach: Array<() => void> = [];
+    for (let i = restorers.length - 1; i >= 0; i--)
+        reattach.push(restorers[i]());
+    try {
+        return root.clone(true);
+    }
+    finally {
+        for (let i = reattach.length - 1; i >= 0; i--)
+            reattach[i]();
+    }
+}
+
+/**
  * Clones a parsed `KhrAssetBundle` in O(nodes) while sharing GPU `BufferGeometry` / `Material` buffers
  * and Rapier `Float32Array` collider vertices. Only restores subtrees belonging to `bundle.scene`.
  */

@@ -192,6 +192,8 @@ export interface KhrBodySpec {
     nodeName: string;
     isKinematic: boolean;
     hasExplicitMotion?: boolean;
+    hasExplicitCom?: boolean;
+    hasExplicitInertia?: boolean;
     mass: number;
     centerOfMass: [number, number, number];
     inertiaDiagonal: [number, number, number];

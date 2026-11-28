@@ -5,18 +5,23 @@ import RAPIER from "@dimforge/rapier3d-compat";
 import { parseGlbJson } from "./glb.js";
 import {
     ATTACHED_PANEL_INTERACTION_GROUPS,
+    KHR_TRIMESH_FLAGS,
+    applyRapierBodyMass,
+    buildBodyMassTarget,
     buildJointRuntime,
+    closedTargetForLimits,
     cloneKhrBundle,
-    computeShapeInertia,
     createRapierImpulseJoint,
     createScopedGltfLoaderClass,
     disposeKhrBundle,
     exportKhrGlb,
+    isJointOpen,
     loadKhrGlb,
     planAssembly,
+    toggleDrivenJoint,
 } from "./index.js";
 import { registerMountedSubtree } from "./clone.js";
-import { solveWheelLoads } from "./vehicle.js";
+import { mergeVehiclePanelUserData, solveWheelLoads } from "./vehicle.js";
 
 describe("@khr3/core physics, glTF round-trip, and Rapier WASM joints", () => {
     it("round-trips KHR_physics_rigid_bodies + OMI_vehicle_wheel, deduplicates tables, and preserves sceneExtras.tune / ecctrl", async () => {
@@ -97,25 +102,46 @@ describe("@khr3/core physics, glTF round-trip, and Rapier WASM joints", () => {
         disposeKhrBundle(bundle);
     });
 
-    it("integrates exact signed-tetrahedron trimesh and convexHull inertia matching analytical box inertia", async () => {
-        const boxGeo = new THREE.BoxGeometry(2, 3, 4);
-        const pos = boxGeo.getAttribute("position");
-        const idx = boxGeo.getIndex()!;
-        const verts = new Float32Array(pos.array);
-        const indices = new Uint32Array(idx.array);
-        const mass = 24;
+    it("delegates trimesh (FIX_INTERNAL_EDGES), convexHull, and explicit-CoM inertia directly to Rapier WASM", async () => {
+        await RAPIER.init();
+        const world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+        assert.equal(KHR_TRIMESH_FLAGS, RAPIER.TriMeshFlags.FIX_INTERNAL_EDGES);
 
-        const triInertia = computeShapeInertia({ type: "trimesh", vertices: verts, indices, meshNodeName: "BoxMesh" }, mass);
-        const hullInertia = computeShapeInertia({ type: "convexHull", vertices: verts, meshNodeName: "BoxHull" }, mass);
-        const expected: [number, number, number] = [
-            (mass * (9 + 16)) / 12,
-            (mass * (4 + 16)) / 12,
+        const boxGeo = new THREE.BoxGeometry(2, 3, 4);
+        const verts = new Float32Array(boxGeo.getAttribute("position").array);
+        const indices = new Uint32Array(boxGeo.getIndex()!.array);
+        const mass = 24;
+        const expectedSorted = [
             (mass * (4 + 9)) / 12,
+            (mass * (4 + 16)) / 12,
+            (mass * (9 + 16)) / 12,
         ];
-        for (let k = 0; k < 3; k++) {
-            assert.ok(Math.abs(triInertia[k] - expected[k]) < 1e-4, `trimesh I[${k}] = ${triInertia[k]} != ${expected[k]}`);
-            assert.ok(Math.abs(hullInertia[k] - expected[k]) < 1e-4, `convexHull I[${k}] = ${hullInertia[k]} != ${expected[k]}`);
+
+        for (const desc of [
+            RAPIER.ColliderDesc.trimesh(verts, indices, KHR_TRIMESH_FLAGS),
+            RAPIER.ColliderDesc.convexHull(verts)!,
+        ]) {
+            const rb = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic());
+            world.createCollider(desc, rb);
+            applyRapierBodyMass(rb, {
+                mass,
+                com: [0.25, -0.5, 0],
+                hasExplicitCom: true,
+                inertiaDiagonal: [0, 0, 0],
+                inertiaFrame: [0, 0, 0, 1],
+                hasExplicitInertia: false,
+            });
+            assert.ok(Math.abs(rb.mass() - mass) < 1e-4);
+            const pi = rb.principalInertia();
+            const gotSorted = [pi.x, pi.y, pi.z].sort((a, b) => a - b);
+            for (let k = 0; k < 3; k++) {
+                assert.ok(Math.abs(gotSorted[k] - expectedSorted[k]) < 1e-3, `Rapier WASM I[${k}] = ${gotSorted[k]} != ${expectedSorted[k]}`);
+            }
+            const com = rb.localCom();
+            assert.ok(Math.abs(com.x - 0.25) < 1e-5 && Math.abs(com.y - -0.5) < 1e-5);
         }
+
+        world.free();
         boxGeo.dispose();
     });
 
@@ -167,7 +193,7 @@ describe("@khr3/core physics, glTF round-trip, and Rapier WASM joints", () => {
             RAPIER.ColliderDesc.cuboid(0.45, 1.05, 0.025).setMass(35).setCollisionGroups(ATTACHED_PANEL_INTERACTION_GROUPS),
             childBody,
         );
-        childBody.userData = { tag: "keepMe", ecctrl: { excludeVehicleRay: true } };
+        childBody.userData = mergeVehiclePanelUserData({ kolmoSpawnedId: "veh_42", name: "TestCoupe" });
 
         const imp = createRapierImpulseJoint(
             RAPIER,
@@ -190,13 +216,22 @@ describe("@khr3/core physics, glTF round-trip, and Rapier WASM joints", () => {
             object: part.spec.object,
             axisParent: part.axisParent,
             anchorParent: part.restRelParentPos,
-            limits: part.joint.limits,
+            limits: [0.6, Math.PI / 2],
             drive: part.joint.drive,
             breakaway: part.spec.breakaway,
             rapierJoint: imp,
             parentBody,
             childBody,
         });
+
+        assert.equal(closedTargetForLimits([0.6, Math.PI / 2]), 0.6);
+        rt.applyTarget(0.6);
+        assert.equal(isJointOpen(rt), false, "Joint at lower limit 0.6 in [0.6, pi/2] must read closed");
+        assert.equal(toggleDrivenJoint(rt), true);
+        assert.equal(rt.positionTarget, Math.PI / 2);
+        assert.equal(isJointOpen(rt), true);
+        assert.equal(toggleDrivenJoint(rt), true);
+        assert.equal(rt.positionTarget, 0.6, "Closing joint with positive lower limit must clamp to lower limit 0.6");
 
         rt.applyTarget(Math.PI / 3);
         for (let i = 0; i < 90; i++)
@@ -210,7 +245,9 @@ describe("@khr3/core physics, glTF round-trip, and Rapier WASM joints", () => {
         assert.equal(rt.applyImpactImpulse(240), "detached");
         assert.equal(rt.detached, true);
         assert.equal(childCol.collisionGroups(), 0xffffffff);
-        assert.equal((childBody.userData as { tag?: string }).tag, "keepMe");
+        const detachedUd = childBody.userData as { kolmoSpawnedId?: string; ecctrl?: { excludeVehicleRay?: boolean } };
+        assert.equal(detachedUd.kolmoSpawnedId, "veh_42");
+        assert.equal(detachedUd.ecctrl?.excludeVehicleRay, false);
 
         world.free();
         disposeKhrBundle(bundle);
@@ -239,6 +276,28 @@ describe("@khr3/core physics, glTF round-trip, and Rapier WASM joints", () => {
         const ScopedProto = createScopedGltfLoaderClass();
         const loaderInstance = new ScopedProto();
         assert.equal(typeof loaderInstance.parse, "function");
+
+        // Verify exporting a scene with temporarily detached mounted subtrees restores them without disturbing live slot
+        const slot = new THREE.Group();
+        bundleA.scene.remove(bundleA.bodies[0].object);
+        slot.add(bundleA.bodies[0].object);
+        const untrackMounted = registerMountedSubtree(bundleA.scene, () => {
+            slot.remove(bundleA.bodies[0].object);
+            bundleA.scene.add(bundleA.bodies[0].object);
+            return () => {
+                bundleA.scene.remove(bundleA.bodies[0].object);
+                slot.add(bundleA.bodies[0].object);
+            };
+        });
+        const liveExported = await exportKhrGlb(bundleA.scene, [
+            { nodeName: "CrateA", motion: { mass: 10 }, collider: { shape: { type: "box", size: [1, 1, 1] } } },
+        ]);
+        assert.equal(bundleA.bodies[0].object.parent, slot, "Live mounted subtree must remain attached to slot");
+        assert.ok(buildBodyMassTarget(bundleA.bodies[0]) !== null);
+        const reimported = await loadKhrGlb(liveExported);
+        assert.equal(reimported.bodies.length, 1);
+        untrackMounted();
+        disposeKhrBundle(reimported);
 
         disposeKhrBundle(clonedA, { disposeTemplate: true });
         boxA.geometry.dispose();

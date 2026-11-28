@@ -25,10 +25,15 @@ const COMBINE_RULES: Record<KhrCombineMode, CoefficientCombineRule> = {
     multiply: CoefficientCombineRule.Multiply,
 };
 
+/** `RAPIER.TriMeshFlags.FIX_INTERNAL_EDGES` (144) — merges duplicate vertices and suppresses internal seam ghost normals. */
+export const KHR_TRIMESH_FLAGS = 144;
+
 export interface KhrColliderProps {
     c: KhrColliderSpec;
     position?: [number, number, number];
     quaternion?: [number, number, number, number];
+    density?: number;
+    mass?: number;
     massProperties?: ColliderMass;
     collisionGroups?: number;
     solverGroups?: number;
@@ -39,6 +44,8 @@ export function KhrCollider({
     c,
     position,
     quaternion,
+    density,
+    mass,
     massProperties,
     collisionGroups,
     solverGroups,
@@ -55,16 +62,21 @@ export function KhrCollider({
 
     useEffect(() => {
         innerRef.current?.parent()?.recomputeMassPropertiesFromColliders();
-    }, [c, massProperties]);
+    }, [c, density, mass, massProperties]);
 
     const effCollisionGroups = c.collisionGroups ?? collisionGroups;
     const effSolverGroups = solverGroups ?? effCollisionGroups;
+    const massOption = massProperties
+        ? { massProperties }
+        : mass !== undefined
+            ? { mass }
+            : { density: density ?? 0 };
 
     const common = {
         ref: setRef,
         position: position ?? c.localPosition,
         quaternion: quaternion ?? c.localQuaternion,
-        ...(massProperties ? { massProperties } : { density: 0 }),
+        ...massOption,
         ...(c.friction === undefined ? {} : { friction: c.friction }),
         ...(c.restitution === undefined ? {} : { restitution: c.restitution }),
         ...(c.frictionCombine === undefined ? {} : { frictionCombineRule: COMBINE_RULES[c.frictionCombine] }),
@@ -86,5 +98,5 @@ export function KhrCollider({
         return <CapsuleCollider args={[shape.height * 0.5, shape.radiusTop]} {...common} />;
     if (shape.type === "convexHull")
         return <ConvexHullCollider args={[shape.vertices]} {...common} />;
-    return <TrimeshCollider args={[shape.vertices, shape.indices]} {...common} />;
+    return <TrimeshCollider args={[shape.vertices, shape.indices, KHR_TRIMESH_FLAGS] as unknown as [Float32Array, Uint32Array]} {...common} />;
 }
